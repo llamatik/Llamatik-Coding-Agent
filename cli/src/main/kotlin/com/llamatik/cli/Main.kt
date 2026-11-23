@@ -6,6 +6,7 @@ import java.io.File
 import kotlin.system.exitProcess
 
 fun main(args: Array<String>) {
+    useLauncherStderr()
     var options = try {
         CliArgs.parse(args.toList())
     } catch (e: UsageException) {
@@ -40,5 +41,18 @@ private fun installInterruptHandler(app: CliApp) {
         }
     } catch (_: Throwable) {
         // Signals are unavailable on this platform: Ctrl-C then terminates the process as usual.
+    }
+}
+
+/**
+ * The launcher hides the native library's log noise by pointing fd 2 at /dev/null and passing the real
+ * stderr as the descriptor named in LLAMATIK_ERR_FD; our own errors go there.
+ */
+private fun useLauncherStderr() {
+    val fd = System.getenv("LLAMATIK_ERR_FD")?.toIntOrNull() ?: return
+    try {
+        System.setErr(java.io.PrintStream(java.io.FileOutputStream("/dev/fd/$fd"), true))
+    } catch (_: Exception) {
+        // Not available here: errors stay on the default stderr.
     }
 }

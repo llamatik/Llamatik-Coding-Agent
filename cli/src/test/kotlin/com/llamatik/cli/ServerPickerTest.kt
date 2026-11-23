@@ -41,8 +41,8 @@ class ServerPickerTest {
         val t = ScriptedTerminal("2")
         val result = picker(t, node("Mac Studio", "192.168.1.5"), node("Pixel", "192.168.1.9", 9000)).pick()
         assertEquals(ServerPicker.Result.Picked("192.168.1.9:9000", "Pixel"), result)
-        assertTrue(t.out.contains("1) Mac Studio"))
-        assertTrue(t.out.contains("2) Pixel"))
+        assertTrue(Regex("1\\s+Mac Studio\\s+192.168.1.5").containsMatchIn(t.out))
+        assertTrue(Regex("2\\s+Pixel\\s+192.168.1.9:9000").containsMatchIn(t.out))
     }
 
     @Test

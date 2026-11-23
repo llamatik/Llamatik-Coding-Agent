@@ -103,6 +103,12 @@ class AgentLoop(
         // Edit requests get a forced write pass when the model answers in prose; questions keep their answer.
         val wantsEdit = TaskIntent.wantsEdit(cleanInstruction)
 
+        // Plain conversation or creative writing with nothing attached: answer in chat mode (no tools, no
+        // project language rules) so the model writes what was asked instead of wrapping it in code.
+        if (fileContext.isBlank() && TaskIntent.isConversation(cleanInstruction)) {
+            return submitConversation(session, cleanInstruction, config, onToken, onFinished, onError)
+        }
+
         val contextHint = promptBuilder.buildContextHint()
 
         // If the user didn't attach a file this turn and didn't reference "this file", inherit the
@@ -710,6 +716,40 @@ class AgentLoop(
         runRound(toolAugmentedMessages, 1, emptyList())
 
         return compositeHandle
+    }
+
+    /** One chat-mode turn for [submit]: same session history, but no tools and no edit proposals. */
+    private fun submitConversation(
+        session: ChatSession,
+        instruction: String,
+        config: BackendConfig,
+        onToken: (String) -> Unit,
+        onFinished: (ChatMessage, List<EditProposal>) -> Unit,
+        onError: (String) -> Unit,
+    ): GenerationHandle {
+        val history = promptBuilder.fitMessagesInBudget(session.messages, HISTORY_BUDGET_CHARS)
+        session.messages += ChatMessage(role = ChatRole.USER, content = instruction.take(USER_INSTRUCTION_MAX_CHARS))
+        val messages = history + session.messages.last()
+        val streamFilter = StreamFilter(StreamFilter.Mode.CHAT, onAnswer = onToken)
+        return backend.generate(
+            GenerationRequest(
+                systemPrompt = promptBuilder.buildConversationSystemPrompt(),
+                messages = messages,
+                config = config,
+                sessionTag = SessionTag.CHAT,
+            ),
+            object : GenerationCallbacks {
+                override fun onToken(token: String) = streamFilter.accept(token)
+                override fun onCompleted(fullText: String) {
+                    val answer = ToolCallParser.stripThinking(ToolCallParser.stripLeadingEcho(fullText, instruction)).trim()
+                        .ifBlank { "The model did not produce an answer. Try asking again." }
+                    val message = ChatMessage(role = ChatRole.ASSISTANT, content = answer)
+                    session.messages += message
+                    onFinished(message, emptyList())
+                }
+                override fun onError(message: String, throwable: Throwable?) = onError(message)
+            },
+        )
     }
 
     /**

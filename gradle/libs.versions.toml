@@ -8,6 +8,8 @@ jmdns = "3.6.5"
 llamatik = "2.5.0"
 acp = "0.34.0"
 slf4j = "2.0.16"
+jline = "3.27.1"
+mordant = "3.0.2"
 nexus-publish = "2.0.0"
 
 [libraries]
@@ -16,6 +18,8 @@ gson = { module = "com.google.code.gson:gson", version.ref = "gson" }
 jmdns = { module = "org.jmdns:jmdns", version.ref = "jmdns" }
 llamatik-core = { module = "com.llamatik:core", version.ref = "llamatik" }
 acp = { module = "com.agentclientprotocol:acp", version.ref = "acp" }
+mordant = { module = "com.github.ajalt.mordant:mordant", version.ref = "mordant" }
+jline = { module = "org.jline:jline", version.ref = "jline" }
 slf4j-nop = { module = "org.slf4j:slf4j-nop", version.ref = "slf4j" }
 slf4j-simple = { module = "org.slf4j:slf4j-simple", version.ref = "slf4j" }
 

@@ -83,10 +83,15 @@ class CliApp(
             var finished: Pair<ChatMessage, List<EditProposal>>? = null
             var error: String? = null
             current.set(turn)
+            val progress = terminal.progress("Working", handle.config.maxTokens.toLong())
+            this.progress = progress
+            streaming = false
+            progress.update(0)
             try {
                 turn.handle = loop.submit(
                     session = session, userPrompt = prompt, config = handle.config,
                     onToken = ::showProgress,
+                    onTokenCount = { progress.update(it.toLong()) },
                     onFinished = { message, proposals -> finished = message to proposals; turn.latch.countDown() },
                     onError = { error = it; turn.latch.countDown() },
                 )
@@ -94,6 +99,8 @@ class CliApp(
                 turn.latch.await()
             } finally {
                 current.set(null)
+                progress.close()
+                this.progress = Progress.None
             }
             if (turn.cancelled) {
                 terminal.println(terminal.style(Style.YELLOW, "Cancelled."))
@@ -104,18 +111,40 @@ class CliApp(
                 return Outcome.FAILED
             }
             val (message, proposals) = finished!!
-            if (message.content.isNotBlank()) terminal.println(message.content.trim())
+            if (streaming) terminal.println() // the text is already on screen
+            else if (message.content.isNotBlank()) terminal.println(message.content.trim())
+            streaming = false
             proposals.forEach { apply(it) }
             return Outcome.OK
         }
 
+        @Volatile private var progress: Progress = Progress.None
+        private var streaming = false
+
         private fun showProgress(token: String) {
             when {
-                token.startsWith(STATUS_PREFIX) -> terminal.println(terminal.style(Style.DIM, "· " + token.removePrefix(STATUS_PREFIX).trim()))
+                token.startsWith(STATUS_PREFIX) -> progress.pause {
+                    terminal.println(terminal.style(Style.DIM, "· " + token.removePrefix(STATUS_PREFIX).trim()))
+                }
                 token.startsWith(TOOL_PREFIX) -> {
                     val (name, arg) = token.removePrefix(TOOL_PREFIX).trim().let { it.substringBefore(':') to it.substringAfter(':', "") }
-                    terminal.println(terminal.style(Style.CYAN, "→ $name") + if (arg.isNotBlank()) terminal.style(Style.DIM, " $arg") else "")
+                    progress.pause {
+                        terminal.println(terminal.style(Style.CYAN, "→ $name") + if (arg.isNotBlank()) terminal.style(Style.DIM, " $arg") else "")
+                    }
                 }
+                else -> streamAnswer(token)
+            }
+        }
+
+        /** Answer text arrives token by token (conversation replies): show it as it is written. */
+        private fun streamAnswer(token: String) {
+            if (!streaming) {
+                if (token.isBlank()) return
+                progress.close() // the live bar gives way to the text
+                streaming = true
+                terminal.print(token.trimStart())
+            } else {
+                terminal.print(token)
             }
         }
 
@@ -156,7 +185,7 @@ class CliApp(
             val text = line.trim()
             when {
                 text.isEmpty() -> continue
-                text == "/exit" || text == "/quit" -> return 0
+                text == "/exit" || text == "/quit" || text == "exit" || text == "quit" -> return 0
                 text == "/help" -> terminal.println(CliArgs.USAGE.substringAfter("In a session: ").let { "In a session: $it" })
                 text == "/clear" -> { agent.session = ChatSession(); terminal.println(terminal.style(Style.DIM, "Conversation cleared.")) }
                 text == "/yes" -> {

@@ -54,8 +54,8 @@ IDE plugins whose classloaders ship older copies of those). See [docs/agent-core
 
 ```bash
 ./gradlew build            # compile and test everything
-./gradlew :cli:installDist # build/install/cli/bin/llamatik
-./gradlew :acp:installDist # build/install/acp/bin/llamatik-acp
+./gradlew :cli:installDist # cli/build/install/llamatik/bin/llamatik
+./gradlew :acp:installDist # acp/build/install/llamatik-acp/bin/llamatik-acp
 ```
 
 ---
@@ -64,19 +64,19 @@ IDE plugins whose classloaders ship older copies of those). See [docs/agent-core
 
 ```bash
 # Local GGUF model, in-process
-build/install/cli/bin/llamatik --model /path/to/model.gguf
+cli/build/install/llamatik/bin/llamatik --model /path/to/model.gguf
 
 # A Llamatik server (e.g. the Llamatik app with "Share this device")
-build/install/cli/bin/llamatik --server 192.168.1.20
+cli/build/install/llamatik/bin/llamatik --server 192.168.1.20
 
 # Scan the local network and pick a server
-build/install/cli/bin/llamatik --discover
+cli/build/install/llamatik/bin/llamatik --discover
 
 # One-shot prompt
-build/install/cli/bin/llamatik -m model.gguf -p "Explain this project"
+cli/build/install/llamatik/bin/llamatik -m model.gguf -p "Explain this project"
 ```
 
-For editors, point your ACP client at `build/install/acp/bin/llamatik-acp` (same `--model` / `--server` options).
+For editors, point your ACP client at `acp/build/install/llamatik-acp/bin/llamatik-acp` (same `--model` / `--server` options).
 
 ---
 

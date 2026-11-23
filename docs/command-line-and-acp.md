@@ -47,6 +47,7 @@ llamatik -C ~/code/app -m model.gguf --yes -p "add a README section about setup"
 * In a session: `/help`, `/clear` (forget the conversation), `/yes` (toggle auto-approve), `/exit`.
   `Ctrl-C` stops the current task; pressed again with nothing running it exits.
 * `--debug` prints each raw model reply, which helps when a small model ignores the tool format.
+* `--native-logs` shows llama.cpp's own log output (Metal kernel compilation and similar). The launcher hides it by default; the CLI's own errors are still shown. This applies to the Unix launcher only.
 * Exit codes: `0` ok, `1` the task failed or was cancelled, `2` no usable model/server, `64` bad usage.
 
 Small models (around 1B parameters) usually cannot follow the tool protocol. Use a coding-capable model

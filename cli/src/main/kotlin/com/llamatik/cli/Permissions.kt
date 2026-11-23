@@ -21,7 +21,7 @@ class TerminalPermissionPrompt(private val terminal: Terminal, autoApprove: Bool
     override fun confirm(request: PermissionRequest): Decision {
         if (auto.get() || request.kind in always) return Decision.ALLOW_ONCE
         if (request.detail.isNotBlank()) terminal.println(request.detail)
-        val answer = terminal.readLine(terminal.style(Style.YELLOW, "${request.title} [y/N/a=always] ")) ?: return Decision.DENY
+        val answer = terminal.readLine(terminal.style(Style.YELLOW, "${request.title} [y/N/a=always] "), remember = false) ?: return Decision.DENY
         return when (answer.trim().lowercase()) {
             "y", "yes" -> Decision.ALLOW_ONCE
             "a", "always" -> { always += request.kind; Decision.ALLOW_ALWAYS }

@@ -106,13 +106,11 @@ class PromptBuilder(
             appendLine("LANGUAGE: This is a $lang project. You MUST write ALL code exclusively in $lang.")
             appendLine("NEVER output Python, Java, or any other language. Only $lang.")
         }
-        appendLine("OUTPUT FORMAT — strictly follow this every response:")
+        appendLine("OUTPUT FORMAT — follow this every response:")
         appendLine("  Optional: <think>brief reasoning</think>")
-        appendLine("  Then IMMEDIATELY one of:")
-        appendLine("    A) One or more tool calls (no prose before or after the XML)")
-        appendLine("    B) write_file/create_file tool calls to apply changes")
-        appendLine("    C) A plain-text answer (only when no file changes are needed)")
-        appendLine("NEVER write prose like 'I will now...' or 'I'll start by...' — go straight to the tool call or answer.")
+        appendLine("  Then IMMEDIATELY either tool calls (no prose around the XML; use write_file/create_file to apply changes)")
+        appendLine("  or, when no tools are needed (questions, stories, explanations), a plain-text answer.")
+        appendLine("Do not write prose like 'I will now...' or 'I'll start by...' — go straight to the tool call or answer.")
         appendLine("Use ONLY file paths that exist in the project. Never invent paths.")
         // Compact tool list keeps the system prompt within n_batch budget (models often use n_batch=2048).
         // The model infers each tool's purpose from its name; the format example shows the XML syntax.
@@ -155,6 +153,13 @@ class PromptBuilder(
         appendLine("8. External knowledge is DISABLED unless explicitly allowed.")
         appendLine("9. Preserve ALL existing behavior unless the mission explicitly requires a change.")
         appendLine("10. Never skip the plan step. Never mutate without prior context gathering.")
+    }
+
+    /** System prompt for plain conversation and creative writing: answer exactly what was asked, no code. */
+    fun buildConversationSystemPrompt(): String = buildString {
+        appendLine("You are a helpful, creative assistant.")
+        appendLine("Do exactly what the user asks. For stories, poems and other writing, reply with the finished text itself in plain prose.")
+        appendLine("Do not write code, code fences or tool calls unless the user asks for code.")
     }
 
     /** System prompt for the Ask tab: no tools, optionally the open file and selection. */

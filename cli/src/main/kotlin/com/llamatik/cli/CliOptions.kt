@@ -17,6 +17,8 @@ data class CliOptions(
     val aggressive: Boolean = false,
     /** Print every model reply as it arrives (for diagnosing odd behaviour). */
     val debug: Boolean = false,
+    /** Keep the native library's own log output (hidden by the launcher unless this is set). */
+    val nativeLogs: Boolean = false,
     val params: InferenceParams = InferenceParams(),
     val help: Boolean = false,
     val version: Boolean = false,
@@ -51,6 +53,7 @@ object CliArgs {
                 "-y", "--yes" -> o = o.copy(yes = true)
                 "--aggressive" -> o = o.copy(aggressive = true)
                 "--debug" -> o = o.copy(debug = true)
+                "--native-logs" -> o = o.copy(nativeLogs = true)
                 "--temperature" -> p = p.copy(temperature = v().toDoubleOrNull() ?: throw UsageException("--temperature needs a number"))
                 "--max-tokens" -> p = p.copy(maxTokens = n())
                 "--context" -> p = p.copy(contextSize = n())
@@ -85,6 +88,7 @@ object CliArgs {
         |  -y, --yes                   apply edits and run commands without asking
         |      --aggressive            use the aggressive execution mode
         |      --debug                 print each raw model reply
+        |      --native-logs           show llama.cpp's own log output (hidden by default)
         |
         |Inference:
         |      --temperature <n>       sampling temperature (default 0.7)

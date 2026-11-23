@@ -38,7 +38,7 @@ class ServerPicker(
 
     private fun chooseOne(servers: List<DiscoveredServer>): Result {
         terminal.println()
-        servers.forEachIndexed { i, s -> terminal.println("  ${i + 1}) ${s.name}  ${terminal.style(Style.DIM, s.address)}") }
+        terminal.println(terminal.table(listOf("#", "Server", "Address"), servers.mapIndexed { i, s -> listOf("${i + 1}", s.name, s.address) }))
         if (!terminal.interactive) {
             return Result.Failed("Several Llamatik servers found; choose one with --server <host[:port]>.")
         }
