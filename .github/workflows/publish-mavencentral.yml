@@ -1,0 +1,52 @@
+name: Publish to Maven Central on Release
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  publish:
+    name: Publish agent-core and agent-backends
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: gradle
+
+      - name: Configure Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # The tag is the version: v1.2.0 publishes 1.2.0.
+      - name: Compute version from tag
+        id: v
+        run: |
+          RAW_REF="${GITHUB_REF_NAME}"
+          echo "version=${RAW_REF#v}" >> $GITHUB_OUTPUT
+
+      # Never publish a release that does not pass its own tests.
+      - name: Test
+        run: ./gradlew test --stacktrace
+
+      - name: Publish to Sonatype (staging + release)
+        env:
+          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+          SIGNING_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
+          RELEASE_VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          ./gradlew \
+            publishToSonatype \
+            closeAndReleaseSonatypeStagingRepository \
+            --stacktrace

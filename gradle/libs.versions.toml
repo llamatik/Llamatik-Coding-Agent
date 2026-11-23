@@ -1,0 +1,24 @@
+[versions]
+# Kept on 2.3.0 on purpose: the IntelliJ plugin that consumes these libraries compiles with it, and a newer
+# compiler would publish metadata the plugin's compiler may refuse to read.
+kotlin = "2.3.0"
+junit = "4.13.2"
+gson = "2.11.0"
+jmdns = "3.6.5"
+llamatik = "2.5.0"
+acp = "0.34.0"
+slf4j = "2.0.16"
+nexus-publish = "2.0.0"
+
+[libraries]
+junit = { module = "junit:junit", version.ref = "junit" }
+gson = { module = "com.google.code.gson:gson", version.ref = "gson" }
+jmdns = { module = "org.jmdns:jmdns", version.ref = "jmdns" }
+llamatik-core = { module = "com.llamatik:core", version.ref = "llamatik" }
+acp = { module = "com.agentclientprotocol:acp", version.ref = "acp" }
+slf4j-nop = { module = "org.slf4j:slf4j-nop", version.ref = "slf4j" }
+slf4j-simple = { module = "org.slf4j:slf4j-simple", version.ref = "slf4j" }
+
+[plugins]
+kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
+nexus-publish = { id = "io.github.gradle-nexus.publish-plugin", version.ref = "nexus-publish" }
