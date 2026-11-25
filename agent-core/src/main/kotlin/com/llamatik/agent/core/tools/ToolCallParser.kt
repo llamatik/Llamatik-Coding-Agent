@@ -38,6 +38,16 @@ object ToolCallParser {
         }.toList()
     }
 
+    /** The JSON form many chat models are trained on: `<tool_call>{"name": "x", "arguments": {...}}</tool_call>`. */
+    private val jsonFormPattern = Regex(
+        "<tool_call>\\s*\\{\\s*\"name\"\\s*:\\s*\"([^\"]+)\"\\s*,\\s*\"arguments\"\\s*:\\s*(\\{.*?\\})\\s*\\}\\s*(?:</tool_call>|$)",
+        setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE),
+    )
+
+    /** Tool calls written in the JSON form (see [jsonFormPattern]); empty when the text uses none. */
+    fun parseJsonForm(text: String): List<ToolCall> =
+        jsonFormPattern.findAll(text).map { ToolCall(it.groupValues[1].trim(), extractArgs(it.groupValues[1], it.groupValues[2])) }.toList()
+
     private val incompleteToolPattern = Regex(
         "<tool_call\\s+name=\"([^\"]+)\">(.*?)(?:</tool_call>|$)",
         setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE),

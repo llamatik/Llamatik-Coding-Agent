@@ -60,7 +60,7 @@ class CliAppTest {
         val backend = FakeBackend(call("read_file", "path" to "src/Calc.kt"), "The add function subtracts instead of adding, which is a bug.")
         val code = app(CliOptions(prompt = "what does src/Calc.kt do?", workDir = root.toPath()), t, backend).run()
         assertEquals(0, code)
-        assertTrue(t.out.contains("→ read_file"))
+        assertTrue(t.out.contains("Read(src/Calc.kt)"))
         assertTrue(t.out.contains("The add function subtracts instead of adding, which is a bug."))
     }
 
@@ -68,7 +68,7 @@ class CliAppTest {
     fun `an approved edit is written to disk after showing the diff`() {
         val root = project("src/Calc.kt" to "fun add(a: Int, b: Int) = a - b\n")
         val t = ScriptedTerminal("y")
-        val backend = FakeBackend(call("write_file", "path" to "src/Calc.kt", "content" to "fun add(a: Int, b: Int) = a + b\n"))
+        val backend = FakeBackend(call("write_file", "path" to "src/Calc.kt", "content" to "fun add(a: Int, b: Int) = a + b\n"), "Fixed add.")
         val code = app(CliOptions(prompt = "fix src/Calc.kt", workDir = root.toPath()), t, backend).run()
         assertEquals(0, code)
         assertEquals("fun add(a: Int, b: Int) = a + b\n", File(root, "src/Calc.kt").readText())
@@ -78,13 +78,38 @@ class CliAppTest {
     }
 
     @Test
-    fun `a declined edit leaves the file alone`() {
+    fun `a declined edit leaves the file alone and the model is told`() {
         val root = project("src/Calc.kt" to "fun add(a: Int, b: Int) = a - b\n")
-        val backend = FakeBackend(call("write_file", "path" to "src/Calc.kt", "content" to "fun add(a: Int, b: Int) = a + b\n"))
+        val backend = FakeBackend(
+            call("write_file", "path" to "src/Calc.kt", "content" to "fun add(a: Int, b: Int) = a + b\n"),
+            "Understood, I left it unchanged.",
+        )
         val t = ScriptedTerminal("n")
         app(CliOptions(prompt = "fix src/Calc.kt", workDir = root.toPath()), t, backend).run()
         assertEquals("fun add(a: Int, b: Int) = a - b\n", File(root, "src/Calc.kt").readText())
-        assertTrue(t.out.contains("Skipped src/Calc.kt"))
+        assertTrue(backend.capturedRequests[1].messages.last().content.contains("declined"))
+    }
+
+    @Test
+    fun `the agent explores over several steps and sees each result`() {
+        val root = project("src/Calc.kt" to "fun add(a: Int, b: Int) = a - b\n")
+        val backend = FakeBackend(
+            "I'll look for it. " + call("search_code", "query" to "fun add"),
+            call("read_file", "path" to "src/Calc.kt"),
+            call("replace_in_file", "path" to "src/Calc.kt", "oldText" to "a - b", "newText" to "a + b"),
+            "add now returns the sum.",
+        )
+        val t = ScriptedTerminal("y")
+        assertEquals(0, app(CliOptions(prompt = "fix add", workDir = root.toPath()), t, backend).run())
+        assertEquals("fun add(a: Int, b: Int) = a + b\n", File(root, "src/Calc.kt").readText())
+        assertTrue(t.out.contains("● I'll look for it."))
+        assertTrue(t.out.contains("Search(fun add)"))
+        assertTrue(t.out.contains("Update(src/Calc.kt)"))
+        assertTrue(t.out.contains("add now returns the sum."))
+        // The read result reached the model in the next request.
+        assertTrue(backend.capturedRequests[2].messages.last().content.contains("fun add(a: Int, b: Int) = a - b"))
+        // Tool call XML is never shown to the user.
+        assertFalse(t.out.contains("<tool_call"))
     }
 
     @Test
@@ -99,7 +124,7 @@ class CliAppTest {
     @Test
     fun `--yes applies edits without asking`() {
         val root = project("src/Calc.kt" to "old\n")
-        val backend = FakeBackend(call("create_file", "path" to "src/New.kt", "content" to "class New\n"))
+        val backend = FakeBackend(call("create_file", "path" to "src/New.kt", "content" to "class New\n"), "Created New.")
         val t = ScriptedTerminal()
         val code = app(CliOptions(prompt = "create src/New.kt", workDir = root.toPath(), yes = true), t, backend).run()
         assertEquals(0, code)

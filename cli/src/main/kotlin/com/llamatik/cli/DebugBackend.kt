@@ -12,7 +12,7 @@ class DebugBackend(private val delegate: AssistantBackend, private val terminal:
     override fun generate(request: GenerationRequest, callbacks: GenerationCallbacks): GenerationHandle {
         val n = ++call
         terminal.println(terminal.style(Style.DIM, "[debug] request #$n: system ${request.systemPrompt.length} chars, " +
-            "${request.messages.size} message(s), maxTokens=${request.config.maxTokens}, prefill=${request.assistantPrefill.length} chars"))
+            "${request.messages.size} message(s) (${request.messages.sumOf { it.content.length }} chars), ctx=${request.config.contextLength}, maxTokens=${request.config.maxTokens}, prefill=${request.assistantPrefill.length} chars"))
         return delegate.generate(request, object : GenerationCallbacks by callbacks {
             override fun onCompleted(fullText: String) {
                 terminal.println(terminal.style(Style.DIM, "[debug] reply #$n: ${fullText.length} chars\n$fullText\n[debug] end of reply #$n"))

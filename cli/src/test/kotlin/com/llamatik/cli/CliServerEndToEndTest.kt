@@ -56,7 +56,7 @@ class CliServerEndToEndTest {
         val code = runCli(CliOptions(server = "127.0.0.1:${server.port}", prompt = "fix the add function in Calc.kt", workDir = root.toPath()), terminal)
         assertEquals(terminal.err.toString(), 0, code)
         assertEquals("fun add(a: Int, b: Int) = a + b\n", File(root, "Calc.kt").readText())
-        assertTrue(terminal.out.contains("→ read_file"))
+        assertTrue(terminal.out.contains("Read(Calc.kt)"))
         assertTrue(terminal.out.contains("+fun add(a: Int, b: Int) = a + b"))
     }
 

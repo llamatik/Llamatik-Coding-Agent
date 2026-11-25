@@ -1,22 +1,23 @@
 package com.llamatik.cli
 
 import com.llamatik.agent.backends.BackendHandle
-import com.llamatik.agent.core.agent.AgentLoop
+import com.llamatik.agent.core.agent.CodingAgent
+import com.llamatik.agent.core.agent.CodingListener
+import com.llamatik.agent.core.agent.CodingOutcome
 import com.llamatik.agent.core.agent.ConfirmingToolExecutor
+import com.llamatik.agent.core.agent.EditApplyingToolExecutor
 import com.llamatik.agent.core.agent.FilePromptSources
-import com.llamatik.agent.core.agent.STATUS_PREFIX
-import com.llamatik.agent.core.agent.TOOL_PREFIX
-import com.llamatik.agent.core.agent.ToolPolicy
-import com.llamatik.agent.core.backend.GenerationHandle
+import com.llamatik.agent.core.agent.RunControl
 import com.llamatik.agent.core.host.AgentEnvironment
 import com.llamatik.agent.core.host.Decision
 import com.llamatik.agent.core.host.PermissionKind
 import com.llamatik.agent.core.host.PermissionRequest
-import com.llamatik.agent.core.model.ChatMessage
 import com.llamatik.agent.core.model.ChatSession
 import com.llamatik.agent.core.model.EditProposal
+import com.llamatik.agent.core.tools.ToolCall
+import com.llamatik.agent.core.tools.ToolResult
+import com.llamatik.agent.core.tools.builtin.CodingTools
 import com.llamatik.agent.core.tools.builtin.ToolListExecutor
-import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -29,19 +30,12 @@ class CliApp(
     private val backendFactory: () -> BackendHandle,
 ) {
     private val permissions = TerminalPermissionPrompt(terminal, options.yes)
-    private val current = AtomicReference<Turn?>(null)
-
-    private class Turn(val latch: CountDownLatch) {
-        @Volatile var handle: GenerationHandle? = null
-        @Volatile var cancelled = false
-    }
+    private val current = AtomicReference<RunControl?>(null)
 
     /** Stops the task in progress (Ctrl-C). Returns false when nothing was running. */
     fun cancelCurrent(): Boolean {
-        val turn = current.get() ?: return false
-        turn.cancelled = true
-        turn.handle?.cancel()
-        turn.latch.countDown()
+        val control = current.get() ?: return false
+        control.cancel()
         return true
     }
 
@@ -57,129 +51,136 @@ class CliApp(
         }
         backend.use { handle ->
             val env = AgentEnvironment.headless(options.workDir, permissions)
-            val loop = AgentLoop(
+            val executor = EditApplyingToolExecutor(
+                delegate = ConfirmingToolExecutor(ToolListExecutor(CodingTools.tools()), permissions),
+                env = env,
+                review = ::reviewEdit,
+            )
+            val agent = CodingAgent(
                 backend = if (options.debug) DebugBackend(handle.backend, terminal) else handle.backend,
                 env = env,
-                tools = ConfirmingToolExecutor(ToolListExecutor(), permissions),
-                policy = ToolPolicy.PORTABLE,
+                tools = executor,
+                toolSpecs = CodingTools.specs,
                 sources = FilePromptSources(env, "terminal", options.aggressive),
             )
-            val agent = Agent(loop, env, handle)
+            val session = Session(agent, handle)
             return if (options.prompt != null) {
-                if (agent.runTask(options.prompt) == Outcome.OK) 0 else 1
+                if (session.runTask(options.prompt) == Outcome.OK) 0 else 1
             } else {
-                interactive(agent, handle)
+                interactive(session, handle)
             }
         }
     }
 
     private enum class Outcome { OK, FAILED, CANCELLED }
 
-    private inner class Agent(val loop: AgentLoop, val env: AgentEnvironment, val handle: BackendHandle) {
-        var session = ChatSession()
+    private inner class Session(val agent: CodingAgent, val handle: BackendHandle) {
+        var chat = ChatSession()
 
         fun runTask(prompt: String): Outcome {
-            val turn = Turn(CountDownLatch(1))
-            var finished: Pair<ChatMessage, List<EditProposal>>? = null
-            var error: String? = null
-            current.set(turn)
-            val progress = terminal.progress("Working", handle.config.maxTokens.toLong())
-            this.progress = progress
-            streaming = false
-            progress.update(0)
-            try {
-                turn.handle = loop.submit(
-                    session = session, userPrompt = prompt, config = handle.config,
-                    onToken = ::showProgress,
-                    onTokenCount = { progress.update(it.toLong()) },
-                    onFinished = { message, proposals -> finished = message to proposals; turn.latch.countDown() },
-                    onError = { error = it; turn.latch.countDown() },
-                )
-                if (turn.cancelled) turn.handle?.cancel()
-                turn.latch.await()
+            val control = RunControl()
+            val view = TerminalView(handle.config.maxTokens.toLong())
+            current.set(control)
+            val outcome = try {
+                agent.run(chat, prompt, handle.config, view, control)
             } finally {
                 current.set(null)
-                progress.close()
-                this.progress = Progress.None
+                view.finish()
             }
-            if (turn.cancelled) {
-                terminal.println(terminal.style(Style.YELLOW, "Cancelled."))
-                return Outcome.CANCELLED
-            }
-            error?.let {
-                terminal.error(terminal.style(Style.RED, "error: $it"))
-                return Outcome.FAILED
-            }
-            val (message, proposals) = finished!!
-            if (streaming) terminal.println() // the text is already on screen
-            else if (message.content.isNotBlank()) terminal.println(message.content.trim())
-            streaming = false
-            proposals.forEach { apply(it) }
-            return Outcome.OK
-        }
-
-        @Volatile private var progress: Progress = Progress.None
-        private var streaming = false
-
-        private fun showProgress(token: String) {
-            when {
-                token.startsWith(STATUS_PREFIX) -> progress.pause {
-                    terminal.println(terminal.style(Style.DIM, "· " + token.removePrefix(STATUS_PREFIX).trim()))
+            return when (outcome) {
+                CodingOutcome.Done -> Outcome.OK
+                CodingOutcome.Cancelled -> {
+                    terminal.println(terminal.style(Style.YELLOW, "Cancelled."))
+                    Outcome.CANCELLED
                 }
-                token.startsWith(TOOL_PREFIX) -> {
-                    val (name, arg) = token.removePrefix(TOOL_PREFIX).trim().let { it.substringBefore(':') to it.substringAfter(':', "") }
-                    progress.pause {
-                        terminal.println(terminal.style(Style.CYAN, "→ $name") + if (arg.isNotBlank()) terminal.style(Style.DIM, " $arg") else "")
-                    }
+                is CodingOutcome.Failed -> {
+                    terminal.error(terminal.style(Style.RED, "error: ${outcome.message}"))
+                    Outcome.FAILED
                 }
-                else -> streamAnswer(token)
-            }
-        }
-
-        /** Answer text arrives token by token (conversation replies): show it as it is written. */
-        private fun streamAnswer(token: String) {
-            if (!streaming) {
-                if (token.isBlank()) return
-                progress.close() // the live bar gives way to the text
-                streaming = true
-                terminal.print(token.trimStart())
-            } else {
-                terminal.print(token)
-            }
-        }
-
-        private fun apply(proposal: EditProposal) {
-            terminal.println()
-            terminal.println(terminal.style(Style.BOLD, "Proposed change to ${proposal.filePath}"))
-            if (proposal.summary.isNotBlank()) terminal.println(proposal.summary)
-            terminal.println(colorize(Diff.unified(proposal.filePath, proposal.oldContent, proposal.newContent)))
-            val decision = permissions.confirm(PermissionRequest(PermissionKind.EDIT, "Apply this change to ${proposal.filePath}?"))
-            if (decision == Decision.DENY) {
-                terminal.println(terminal.style(Style.YELLOW, "Skipped ${proposal.filePath}"))
-                return
-            }
-            try {
-                env.files.write(proposal.filePath, proposal.newContent)
-                terminal.println(terminal.style(Style.GREEN, "Updated ${proposal.filePath}"))
-            } catch (e: Exception) {
-                terminal.error(terminal.style(Style.RED, "Could not write ${proposal.filePath}: ${e.message}"))
-            }
-        }
-
-        private fun colorize(diff: String) = diff.lines().joinToString("\n") { line ->
-            when {
-                line.startsWith("+++") || line.startsWith("---") -> terminal.style(Style.BOLD, line)
-                line.startsWith("+") -> terminal.style(Style.GREEN, line)
-                line.startsWith("-") -> terminal.style(Style.RED, line)
-                line.startsWith("@@") -> terminal.style(Style.CYAN, line)
-                else -> line
+                is CodingOutcome.StepLimit -> {
+                    terminal.println(terminal.style(Style.YELLOW, "Stopped after ${outcome.steps} steps without finishing. Say \"continue\" to carry on."))
+                    Outcome.FAILED
+                }
             }
         }
     }
 
-    private fun interactive(agent: Agent, backend: BackendHandle): Int {
+    /** Draws what the agent does: its words as it writes them, each tool it uses, and what came of it. */
+    private inner class TerminalView(private val maxTokens: Long) : CodingListener {
+        private var progress: Progress = Progress.None
+        private var midLine = false
+        private var wroteText = false
+
+        override fun onGenerating(step: Int) {
+            wroteText = false
+            progress = terminal.progress("Working", maxTokens).also { it.update(0) }
+        }
+
+        override fun onTokens(count: Int) = progress.update(count.toLong())
+
+        override fun onText(text: String) {
+            if (!wroteText) {
+                if (text.isBlank()) return
+                progress.close() // the live bar gives way to the text
+                wroteText = true
+                terminal.print(terminal.style(Style.BOLD, "● ") + text.trimStart())
+            } else {
+                terminal.print(text)
+            }
+            midLine = !text.endsWith("\n")
+        }
+
+        override fun onGenerated(step: Int) {
+            progress.close()
+            progress = Progress.None
+            endLine()
+        }
+
+        override fun onToolCall(call: ToolCall) {
+            endLine()
+            val (label, arg) = ToolDisplay.describe(call)
+            terminal.println(terminal.style(Style.CYAN, "● $label") + if (arg.isNotBlank()) terminal.style(Style.DIM, "($arg)") else "")
+        }
+
+        override fun onToolResult(call: ToolCall, result: ToolResult) {
+            val line = "  ⎿ " + ToolDisplay.summarize(call, result)
+            terminal.println(if (result.success) terminal.style(Style.DIM, line) else terminal.style(Style.RED, line))
+        }
+
+        override fun onNotice(message: String) {
+            endLine()
+            terminal.println(terminal.style(Style.DIM, "· $message"))
+        }
+
+        private fun endLine() {
+            if (midLine) { terminal.println(); midLine = false }
+        }
+
+        fun finish() {
+            progress.close()
+            endLine()
+        }
+    }
+
+    /** Shows a proposed edit as a diff and asks whether to apply it. */
+    private fun reviewEdit(proposal: EditProposal): Boolean {
+        terminal.println(colorize(Diff.unified(proposal.filePath, proposal.oldContent, proposal.newContent)))
+        return permissions.confirm(PermissionRequest(PermissionKind.EDIT, "Apply this change to ${proposal.filePath}?")) != Decision.DENY
+    }
+
+    private fun colorize(diff: String) = diff.lines().joinToString("\n") { line ->
+        when {
+            line.startsWith("+++") || line.startsWith("---") -> terminal.style(Style.BOLD, line)
+            line.startsWith("+") -> terminal.style(Style.GREEN, line)
+            line.startsWith("-") -> terminal.style(Style.RED, line)
+            line.startsWith("@@") -> terminal.style(Style.CYAN, line)
+            else -> line
+        }
+    }
+
+    private fun interactive(session: Session, backend: BackendHandle): Int {
         terminal.println(terminal.style(Style.BOLD, "Llamatik Code") + terminal.style(Style.DIM, " — ${backend.description}"))
-        terminal.println(terminal.style(Style.DIM, "Project: ${options.workDir}   /help for commands, /exit to quit"))
+        terminal.println(terminal.style(Style.DIM, "Project: ${options.workDir}   /help for commands, @path to attach a file, /exit to quit"))
         while (true) {
             val line = terminal.readLine(terminal.style(Style.GREEN, "\n> ")) ?: return 0
             val text = line.trim()
@@ -187,13 +188,13 @@ class CliApp(
                 text.isEmpty() -> continue
                 text == "/exit" || text == "/quit" || text == "exit" || text == "quit" -> return 0
                 text == "/help" -> terminal.println(CliArgs.USAGE.substringAfter("In a session: ").let { "In a session: $it" })
-                text == "/clear" -> { agent.session = ChatSession(); terminal.println(terminal.style(Style.DIM, "Conversation cleared.")) }
+                text == "/clear" -> { session.chat = ChatSession(); terminal.println(terminal.style(Style.DIM, "Conversation cleared.")) }
                 text == "/yes" -> {
                     permissions.autoApprove = !permissions.autoApprove
                     terminal.println("Auto-approve is ${if (permissions.autoApprove) "ON" else "off"}.")
                 }
                 text.startsWith("/") -> terminal.println("Unknown command: $text (try /help)")
-                else -> agent.runTask(text)
+                else -> session.runTask(text)
             }
         }
     }

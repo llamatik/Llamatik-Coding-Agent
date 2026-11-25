@@ -112,6 +112,9 @@ class LocalLlamaBackend(
                 ensureModelReady(request.config)
                 val session = sessionFor(request.sessionTag) ?: error("Could not create inference session for ${request.sessionTag}")
                 activeSession.set(session)
+                // Every request carries the whole conversation, but the native session keeps the KV cache of the
+                // previous ones: without this the cache fills up after a few requests ("context full, session reset").
+                session.reset()
                 // If cancel() was called before we reached this point, stop now.
                 if (cancelled.get()) return@execute
 
