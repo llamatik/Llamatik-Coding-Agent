@@ -5,6 +5,9 @@ import com.llamatik.agent.backends.remote.FileTokenStore
 import java.io.File
 import kotlin.system.exitProcess
 
+/** Held so the level setting is not garbage-collected. */
+private val quietLogger: java.util.logging.Logger = java.util.logging.Logger.getLogger("com.llamatik")
+
 fun main(args: Array<String>) {
     useLauncherStderr()
     var options = try {
@@ -14,6 +17,8 @@ fun main(args: Array<String>) {
         System.err.println("Try 'llamatik --help'.")
         exitProcess(64)
     }
+    // The backend logs "Model loaded" at INFO; on a live terminal that line lands in the middle of the status line.
+    if (!options.debug && !options.nativeLogs) quietLogger.level = java.util.logging.Level.WARNING
     val terminal = SystemTerminal()
     if (options.discover && !options.help && !options.version) {
         when (val picked = ServerPicker(terminal).pick()) {

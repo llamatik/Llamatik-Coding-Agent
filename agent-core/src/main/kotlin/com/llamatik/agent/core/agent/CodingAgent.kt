@@ -23,6 +23,8 @@ data class ToolSpec(val name: String, val description: String, val usage: String
 
 /** What a [CodingAgent] reports while it works; a front-end draws it. All methods are called on the agent's thread. */
 interface CodingListener {
+    /** The next request carries about [estimatedTokens] tokens of prompt (the model reads them before it writes). */
+    fun onPrompt(estimatedTokens: Int) {}
     /** A request to the model starts (a spinner can run until [onText] or [onGenerated]). */
     fun onGenerating(step: Int) {}
     /** Number of tokens received so far in the current request. */
@@ -120,6 +122,7 @@ class CodingAgent(
             val messages = fitHistory(session.messages, system, config) + listOfNotNull(nudge)
             nudge = null
             val stepConfig = genConfig.copy(maxTokens = outputTokens(genConfig, system.length + messages.sumOf { it.content.length }))
+            listener.onPrompt(((system.length + messages.sumOf { it.content.length }) / CHARS_PER_TOKEN).toInt())
             listener.onGenerating(step)
             val reply = try {
                 generate(system, messages, stepConfig, listener, control)

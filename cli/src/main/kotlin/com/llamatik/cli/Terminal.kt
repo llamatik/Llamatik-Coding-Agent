@@ -4,16 +4,6 @@ import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.File
 import java.io.PrintStream
-import com.github.ajalt.mordant.animation.progress.animateOnThread
-import com.github.ajalt.mordant.animation.progress.execute
-import com.github.ajalt.mordant.animation.progress.update
-import com.github.ajalt.mordant.widgets.progress.completed
-import com.github.ajalt.mordant.widgets.progress.progressBar
-import com.github.ajalt.mordant.widgets.progress.progressBarLayout
-import com.github.ajalt.mordant.widgets.progress.speed
-import com.github.ajalt.mordant.widgets.progress.spinner
-import com.github.ajalt.mordant.widgets.progress.text
-import com.github.ajalt.mordant.widgets.progress.timeElapsed
 import org.jline.reader.EndOfFileException
 import org.jline.reader.LineReader
 import org.jline.reader.LineReaderBuilder
@@ -37,12 +27,17 @@ interface Terminal {
     /** A table as printable text; plain aligned columns unless the terminal can draw boxes. */
     fun table(headers: List<String>, rows: List<List<String>>): String = plainTable(headers, rows)
 
-    /** A live progress line for work of [total] steps (tokens); a no-op when output is not a terminal. */
-    fun progress(label: String, total: Long): Progress = Progress.None
+    /** A live status line for one model request; a no-op when output is not a terminal. */
+    fun progress(label: String): Progress = Progress.None
 }
 
-/** Live progress of one task. [pause] runs [block] (which prints) without garbling the bar. */
+/**
+ * Live status of one model request. First the model reads the prompt ([context]), then it writes: [update]
+ * receives the number of tokens generated so far. [pause] runs [block] (which prints) without garbling the line.
+ */
 interface Progress : AutoCloseable {
+    /** Estimated size of the prompt being read, in tokens. */
+    fun context(promptTokens: Long) {}
     fun update(done: Long)
     fun pause(block: () -> Unit)
     override fun close()
@@ -132,14 +127,8 @@ class SystemTerminal(
         }
     }
 
-    override fun progress(label: String, total: Long): Progress {
-        if (!interactive || !color || total <= 0) return Progress.None
-        return try {
-            MordantProgress(mordant, label, total)
-        } catch (_: Throwable) {
-            Progress.None
-        }
-    }
+    override fun progress(label: String): Progress =
+        if (interactive && color) SpinnerProgress(out, label) else Progress.None
 
     override fun style(kind: Style, text: String): String {
         if (!color) return text
@@ -152,50 +141,68 @@ class SystemTerminal(
 }
 
 /**
- * Spinner, bar, count and speed on one live line, drawn by Mordant. The animation runs on its own thread,
- * so [pause] tears it down while [block] prints and starts a fresh one afterwards (keeping the count).
+ * One live line: a spinner, what the model is doing, token count, speed and elapsed time, redrawn ten times a
+ * second from its own thread. The speed counts from the first generated token, so reading a long prompt does not
+ * drag it down. [pause] and [close] erase the line first, so whatever is printed next starts clean.
  */
-private class MordantProgress(
-    private val terminal: com.github.ajalt.mordant.terminal.Terminal,
-    private val label: String,
-    private val total: Long,
-) : Progress {
-    private var animator: com.github.ajalt.mordant.animation.progress.ThreadProgressTaskAnimator<Unit>? = null
-    private var done = 0L
-    private var closed = false
+private class SpinnerProgress(private val out: PrintStream, private val label: String) : Progress {
+    private val started = System.nanoTime()
+    @Volatile private var promptTokens = 0L
+    @Volatile private var generated = 0L
+    @Volatile private var firstTokenAt = 0L
+    @Volatile private var running = true
+    private val lock = Any()
+    private val ticker = Thread(::loop, "llamatik-status").apply { isDaemon = true }
 
-    private fun start() {
-        val layout = com.github.ajalt.mordant.widgets.progress.progressBarLayout {
-            spinner(com.github.ajalt.mordant.widgets.Spinner.Dots())
-            text(label)
-            progressBar(width = 24)
-            completed(suffix = " tokens")
-            speed(suffix = " tok/s")
-            timeElapsed()
-        }
-        animator = layout.animateOnThread(terminal, total = total, completed = done, clearWhenFinished = true)
-            .also { it.execute() }
+    init { ticker.start() }
+
+    override fun context(promptTokens: Long) { this.promptTokens = promptTokens }
+
+    override fun update(done: Long) {
+        if (done > 0 && firstTokenAt == 0L) firstTokenAt = System.nanoTime()
+        generated = done
     }
 
-    @Synchronized override fun update(done: Long) {
-        if (closed) return
-        this.done = done.coerceAtMost(total)
-        if (animator == null) start()
-        animator?.update(this.done)
-    }
-
-    @Synchronized override fun pause(block: () -> Unit) {
-        stopAnimation()
+    override fun pause(block: () -> Unit) {
+        erase()
         block()
     }
 
-    @Synchronized override fun close() {
-        closed = true
-        stopAnimation()
+    override fun close() {
+        running = false
+        runCatching { ticker.join(500) }
+        erase()
     }
 
-    private fun stopAnimation() {
-        animator?.clear()
-        animator = null
+    private fun erase() = synchronized(lock) { out.print("\r\u001B[2K"); out.flush() }
+
+    private fun loop() {
+        var frame = 0
+        while (running) {
+            synchronized(lock) {
+                if (running) { out.print("\r\u001B[2K" + render(FRAMES[frame++ % FRAMES.size])); out.flush() }
+            }
+            try { Thread.sleep(100) } catch (_: InterruptedException) { return }
+        }
+    }
+
+    private fun render(spinner: String): String {
+        val now = System.nanoTime()
+        val elapsed = (now - started) / 1_000_000_000
+        val time = "%d:%02d".format(java.util.Locale.ROOT, elapsed / 60, elapsed % 60)
+        val detail = if (generated == 0L) {
+            if (promptTokens > 0) "reading ${compact(promptTokens)} tokens of context" else "thinking"
+        } else {
+            val seconds = (now - firstTokenAt) / 1e9
+            val speed = if (seconds >= 0.5) " · %.1f tok/s".format(java.util.Locale.ROOT, generated / seconds) else ""
+            "writing · $generated tokens$speed"
+        }
+        return "\u001B[36m$spinner\u001B[0m $label · $detail · \u001B[2m$time\u001B[0m"
+    }
+
+    private fun compact(n: Long) = if (n >= 1000) "%.1fK".format(java.util.Locale.ROOT, n / 1000.0) else n.toString()
+
+    private companion object {
+        val FRAMES = listOf("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
     }
 }

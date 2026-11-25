@@ -79,7 +79,7 @@ class CliApp(
 
         fun runTask(prompt: String): Outcome {
             val control = RunControl()
-            val view = TerminalView(handle.config.maxTokens.toLong())
+            val view = TerminalView()
             current.set(control)
             val outcome = try {
                 agent.run(chat, prompt, handle.config, view, control)
@@ -106,14 +106,18 @@ class CliApp(
     }
 
     /** Draws what the agent does: its words as it writes them, each tool it uses, and what came of it. */
-    private inner class TerminalView(private val maxTokens: Long) : CodingListener {
+    private inner class TerminalView : CodingListener {
         private var progress: Progress = Progress.None
         private var midLine = false
         private var wroteText = false
 
+        private var promptTokens = 0L
+
+        override fun onPrompt(estimatedTokens: Int) { promptTokens = estimatedTokens.toLong() }
+
         override fun onGenerating(step: Int) {
             wroteText = false
-            progress = terminal.progress("Working", maxTokens).also { it.update(0) }
+            progress = terminal.progress("Working").also { it.context(promptTokens) }
         }
 
         override fun onTokens(count: Int) = progress.update(count.toLong())
