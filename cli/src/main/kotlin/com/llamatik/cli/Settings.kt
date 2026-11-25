@@ -68,6 +68,17 @@ data class AgentOverrides(
     )
 }
 
+/** Tuning to the machine (see AutoTuner): on unless switched off. */
+data class AutoSettings(
+    val enabled: Boolean? = null,
+    /** Upper bound for the context the tuner picks. */
+    val maxContext: Int? = null,
+    /** Memory the model may use, in MB, when the detected budget is wrong for you. */
+    val memoryBudgetMb: Int? = null,
+) {
+    fun over(other: AutoSettings) = AutoSettings(other.enabled ?: enabled, other.maxContext ?: maxContext, other.memoryBudgetMb ?: memoryBudgetMb)
+}
+
 /** The contents of one settings file (or the merge of several). */
 data class Settings(
     val model: String? = null,
@@ -75,11 +86,12 @@ data class Settings(
     val autoApprove: Boolean? = null,
     val inference: InferenceOverrides = InferenceOverrides(),
     val agent: AgentOverrides = AgentOverrides(),
+    val auto: AutoSettings = AutoSettings(),
 ) {
     /** [other] wins where it has a value. */
     fun over(other: Settings) = Settings(
         model = other.model ?: model, server = other.server ?: server, autoApprove = other.autoApprove ?: autoApprove,
-        inference = inference.over(other.inference), agent = agent.over(other.agent),
+        inference = inference.over(other.inference), agent = agent.over(other.agent), auto = auto.over(other.auto),
     )
 }
 
@@ -136,7 +148,20 @@ object SettingsLoader {
         fun read(): Pair<Settings, List<String>> {
             val inference = section("inference")
             val agent = section("agent")
+            val autoElement = root.get("auto")?.takeUnless { it.isJsonNull }
+            val autoObject = autoElement?.takeIf { it.isJsonObject }?.asJsonObject
+            // "auto": false is shorthand for { "enabled": false }
+            val autoFlag = autoElement?.takeIf { it.isJsonPrimitive }?.let {
+                if (!it.asJsonPrimitive.isBoolean) throw SettingsException("$source: \"auto\" must be true, false or an object")
+                it.asBoolean
+            }
+            if (autoElement != null && autoFlag == null && autoObject == null) throw SettingsException("$source: \"auto\" must be true, false or an object")
             val settings = Settings(
+                auto = AutoSettings(
+                    enabled = autoFlag ?: bool(autoObject, "auto", "enabled"),
+                    maxContext = int(autoObject, "auto", "maxContext", 4096..Int.MAX_VALUE),
+                    memoryBudgetMb = int(autoObject, "auto", "memoryBudgetMB", 512..Int.MAX_VALUE),
+                ),
                 model = string(root, "model"),
                 server = string(root, "server"),
                 autoApprove = bool(section("permissions"), "permissions", "autoApprove"),
@@ -163,7 +188,7 @@ object SettingsLoader {
                     outputReserveShare = double(agent, "agent", "outputReserveShare", 0.05..0.9),
                 ),
             )
-            warnUnknown(root, "", setOf("model", "server", "permissions", "inference", "agent"))
+            warnUnknown(root, "", setOf("model", "server", "permissions", "inference", "agent", "auto"))
             return settings to warnings
         }
 
@@ -226,7 +251,7 @@ object SettingsLoader {
             for (key in obj.keySet()) {
                 if (key !in known) warnings += "$source: unknown setting \"$prefix$key\" ignored"
             }
-            for (name in listOf("inference", "agent", "permissions")) {
+            for (name in listOf("inference", "agent", "permissions", "auto")) {
                 if (prefix.isNotEmpty()) break
                 val child = obj.get(name)?.takeIf { it.isJsonObject }?.asJsonObject ?: continue
                 warnUnknown(child, "$name.", seen[child].orEmpty())

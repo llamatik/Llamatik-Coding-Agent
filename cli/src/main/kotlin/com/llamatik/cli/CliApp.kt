@@ -188,6 +188,10 @@ class CliApp(
 
     private fun interactive(session: Session, backend: BackendHandle): Int {
         terminal.println(terminal.style(Style.BOLD, "Llamatik Code") + terminal.style(Style.DIM, " — ${backend.description}"))
+        if (options.autoNotes.isNotEmpty()) {
+            val c = backend.config
+            terminal.println(terminal.style(Style.DIM, "Tuned for this machine: context ${c.contextLength / 1024}K · ${c.numThreads} threads · batch ${c.batchSize}   (/config for details, --no-auto to turn off)"))
+        }
         options.configWarnings.forEach { terminal.println(terminal.style(Style.YELLOW, "warning: $it")) }
         terminal.println(terminal.style(Style.DIM, "Project: ${options.workDir}   /help for commands, @path to attach a file, /config for settings, /exit to quit"))
         while (true) {
@@ -222,6 +226,8 @@ class CliApp(
             "agent: maxSteps=${l.maxSteps} maxToolCallsPerStep=${l.maxToolCallsPerStep} temperature(cap)=${l.temperatureCap} " +
                 "charsPerToken=${l.charsPerToken} thinking=${l.thinking} maxResultChars=${l.maxResultChars} outputReserveShare=${l.outputReserveShare}",
             "auto-approve: ${permissions.autoApprove}",
+            if (options.autoNotes.isEmpty()) "machine tuning: off (settings, flags, or a server decide)"
+            else "machine tuning: " + options.autoNotes.joinToString("; "),
         ).joinToString("\n")
     }
 

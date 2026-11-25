@@ -103,3 +103,43 @@ class SettingsTest {
         catch (e: SettingsException) { assertTrue(e.message!!.contains("not found")) }
     }
 }
+
+class AutoSettingsTest {
+    private val none = LoadedSettings(Settings(), emptyList(), emptyList())
+    private val suggestion = com.llamatik.agent.backends.auto.Suggestion(contextSize = 32768, threads = 8, gpuLayers = -1, batchSize = 512, maxTokens = 8192, flashAttention = true, notes = listOf("tuned"))
+    private val tune = { _: File, _: AutoSettings -> suggestion }
+
+    @Test
+    fun `the machine fills in what nobody set`() {
+        val o = CliArgs.parse(listOf("-m", "/m/a.gguf")).withSettings(none, tune)
+        assertEquals(32768, o.params.contextSize)
+        assertEquals(512, o.params.batchSize)
+        assertTrue(o.params.flashAttention)
+        assertEquals(listOf("tuned"), o.autoNotes)
+    }
+
+    @Test
+    fun `settings and flags win over the machine`() {
+        val loaded = LoadedSettings(SettingsLoader.parse("""{ "inference": { "contextSize": 8192, "batchSize": 1024 } }""", "f").first, emptyList(), emptyList())
+        val o = CliArgs.parse(listOf("-m", "/m/a.gguf", "--context", "4096")).withSettings(loaded, tune)
+        assertEquals(4096, o.params.contextSize)   // flag
+        assertEquals(1024, o.params.batchSize)     // file
+        assertEquals(8, o.params.threads)          // machine
+    }
+
+    @Test
+    fun `it can be switched off and does not run for a server`() {
+        assertEquals(16384, CliArgs.parse(listOf("-m", "/m/a.gguf", "--no-auto")).withSettings(none, tune).params.contextSize)
+        val off = LoadedSettings(SettingsLoader.parse("""{ "auto": false }""", "f").first, emptyList(), emptyList())
+        assertEquals(16384, CliArgs.parse(listOf("-m", "/m/a.gguf")).withSettings(off, tune).params.contextSize)
+        assertEquals(16384, CliArgs.parse(listOf("-s", "host")).withSettings(none, tune).params.contextSize)
+    }
+
+    @Test
+    fun `the auto section is read and checked`() {
+        val s = SettingsLoader.parse("""{ "auto": { "maxContext": 16384, "memoryBudgetMB": 20000 } }""", "f").first
+        assertEquals(16384, s.auto.maxContext); assertEquals(20000, s.auto.memoryBudgetMb)
+        try { SettingsLoader.parse("""{ "auto": "yes" }""", "f"); error("expected failure") } catch (e: SettingsException) { assertTrue(e.message!!.contains("\"auto\"")) }
+        assertTrue(SettingsLoader.parse("""{ "auto": { "maxContxt": 1 } }""", "f").second.any { it.contains("auto.maxContxt") })
+    }
+}

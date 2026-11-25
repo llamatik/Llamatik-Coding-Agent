@@ -116,11 +116,21 @@ Like Claude Code, the CLI reads JSON settings files; later ones win, and command
     "outputReserveShare": 0.25, // share of the context kept free for the reply
     "thinking": false           // let reasoning models think before each reply (slower)
   },
+  "auto": {                     // tuning to this machine (on by default); "auto": false turns it off
+    "maxContext": 32768,        // never pick more context than this
+    "memoryBudgetMB": 24000     // memory the model may use, if the detected one is wrong for you
+  },
   "permissions": { "autoApprove": false }
 }
 ```
 
-If a task fails with a "context full" error or the agent forgets what it read, raise `inference.contextSize` (the model must support it) or lower `agent.maxResultChars`.
+### Tuning to your machine
+
+You normally do not need to set `contextSize`, `threads`, `batchSize`, `gpuLayers` or `flashAttention`. With a local model the CLI reads the machine (RAM, the GPU memory macOS allows, performance cores) and the model file itself (its size, layers, KV heads, trained context) and chooses values that fit. For example, Qwen3-14B Q8 on a 32 GB M1 Pro gets a 19K context with flash attention and all layers on the GPU, because the weights (14.6 GB) plus two contexts of cache and buffers must stay inside the ~24 GB the GPU may use. A 1B model on the same machine gets its full 32K.
+
+Anything you set in a settings file or as a flag wins over the tuned value. `/config` shows what was chosen and why; `--no-auto` or `"auto": false` turns it off. It does not run for `--server`, where the server decides.
+
+If the agent forgets what it read, lower `agent.maxResultChars` or raise `auto.maxContext` / `inference.contextSize` (the model must support it and the memory must be there; a value that is too large fails with a GPU out-of-memory error).
 
 ---
 

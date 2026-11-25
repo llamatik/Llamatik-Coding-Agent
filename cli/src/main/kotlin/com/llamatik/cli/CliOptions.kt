@@ -1,7 +1,10 @@
 package com.llamatik.cli
 
 import com.llamatik.agent.backends.InferenceParams
+import com.llamatik.agent.backends.auto.AutoTuner
+import com.llamatik.agent.backends.auto.Suggestion
 import com.llamatik.agent.core.agent.CodingLimits
+import java.io.File
 import java.nio.file.Path
 
 /** Everything the command line can ask for. */
@@ -32,6 +35,10 @@ data class CliOptions(
     /** Settings files that were read, and warnings about them, for `/config`. */
     val configFiles: List<String> = emptyList(),
     val configWarnings: List<String> = emptyList(),
+    /** `--no-auto`: do not tune the settings to this machine. */
+    val noAuto: Boolean = false,
+    /** What the machine tuning chose, and why (empty when it did not run). */
+    val autoNotes: List<String> = emptyList(),
     val help: Boolean = false,
     val version: Boolean = false,
 )
@@ -39,17 +46,27 @@ data class CliOptions(
 class UsageException(message: String) : Exception(message)
 
 /** The options with the settings files folded in: defaults < files < flags. */
-fun CliOptions.withSettings(loaded: LoadedSettings): CliOptions {
+fun CliOptions.withSettings(
+    loaded: LoadedSettings,
+    tune: (File, AutoSettings) -> Suggestion? = ::tuneForThisMachine,
+): CliOptions {
     val s = loaded.settings
     // A model or server given as a flag replaces the one in the files (they cannot be combined).
     val flagPicksBackend = model != null || server != null || discover
     val model = if (flagPicksBackend) model else s.model
     val server = if (flagPicksBackend) server else s.server
     if (model != null && server != null) throw SettingsException("Settings name both a model and a server; keep one.")
+    // Only a local model runs on this machine; a server decides for itself.
+    val tuned = if (model != null && !noAuto && s.auto.enabled != false) tune(File(model), s.auto) else null
+    val fromMachine = tuned?.let {
+        InferenceOverrides(contextSize = it.contextSize, threads = it.threads, gpuLayers = it.gpuLayers, batchSize = it.batchSize, maxTokens = it.maxTokens, flashAttention = it.flashAttention)
+    } ?: InferenceOverrides()
     return copy(
         model = model, server = server,
         yes = yes || s.autoApprove == true,
-        params = s.inference.over(flagOverrides).applyTo(InferenceParams()),
+        // defaults < tuned for this machine < settings files < flags
+        params = fromMachine.over(s.inference).over(flagOverrides).applyTo(InferenceParams()),
+        autoNotes = tuned?.notes.orEmpty(),
         limits = s.agent.over(agentFlags).applyTo(CodingLimits()),
         configFiles = loaded.files, configWarnings = loaded.warnings,
     )
@@ -97,6 +114,7 @@ object CliArgs {
                 "--repeat-penalty" -> { val x = v().toDoubleOrNull() ?: throw UsageException("--repeat-penalty needs a number"); p = p.copy(repeatPenalty = x); f = f.copy(repeatPenalty = x) }
                 "--flash-attention" -> { p = p.copy(flashAttention = true); f = f.copy(flashAttention = true) }
                 "--no-mmap" -> { p = p.copy(useMmap = false); f = f.copy(useMmap = false) }
+                "--no-auto" -> o = o.copy(noAuto = true)
                 "--max-steps" -> { val x = n(); af = af.copy(maxSteps = x) }
                 "--think" -> af = af.copy(thinking = true)
                 else -> throw UsageException(
@@ -147,6 +165,11 @@ object CliArgs {
         |      --max-steps <n>         model calls allowed per task (default 30)
         |      --think                 let reasoning models think before each reply (slower)
         |
+        |Machine tuning:
+        |  Unless you set them, the context size, threads, batch size and GPU layers are chosen from this
+        |  machine's memory and cores and the model's own size. Use --no-auto (or "auto": false) to turn it off.
+        |      --no-auto               use fixed defaults instead
+        |
         |Settings files (JSON, flags win over them; see /config in a session):
         |  ~/.llamatik/settings.json                 your defaults for every project
         |  <project>/.llamatik/settings.json         shared with the project
@@ -158,4 +181,18 @@ object CliArgs {
         |
         |In a session: /help, /config (show settings), /clear (forget the conversation), /yes (toggle auto-approve), /exit
     """.trimMargin()
+}
+
+/** The default tuner: reads the machine and the model file; null when the model cannot be read (the backend reports that). */
+fun tuneForThisMachine(model: File, auto: AutoSettings): Suggestion? {
+    if (!model.isFile) return null
+    return try {
+        AutoTuner.tune(
+            model,
+            maxContext = auto.maxContext ?: AutoTuner.DEFAULT_MAX_CONTEXT,
+            memoryBudgetBytes = auto.memoryBudgetMb?.let { it.toLong() * (1L shl 20) },
+        )
+    } catch (_: Exception) {
+        null
+    }
 }
