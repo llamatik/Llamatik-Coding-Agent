@@ -72,7 +72,8 @@ sealed interface CodingOutcome {
 
 data class CodingLimits(
     val maxSteps: Int = 30,
-    val maxToolCallsPerStep: Int = 6,
+    /** More calls than this in one reply are not run (their results would not fit the context together). */
+    val maxToolCallsPerStep: Int = 3,
     /** Blank replies tolerated in a row before giving up. */
     val maxEmptyReplies: Int = 2,
     /** The same call made again within this many steps is answered with a nudge instead of being run again. */
@@ -113,6 +114,7 @@ class CodingAgent(
         val lastSeen = HashMap<String, Int>()
         var emptyReplies = 0
         var malformedReplies = 0
+        var intentNudges = 0
         var nudge: ChatMessage? = null
         var step = 0
 
@@ -146,6 +148,13 @@ class CodingAgent(
                 step--
                 continue
             }
+            if (calls.isEmpty() && visible.length < INTENT_MAX_CHARS && INTENT.containsMatchIn(visible) && intentNudges < MAX_INTENT_NUDGES) {
+                // "Let me analyze…" and then nothing: the model announced an action instead of taking it.
+                intentNudges++
+                session.messages += ChatMessage(role = ChatRole.ASSISTANT, content = visible)
+                session.messages += ChatMessage(role = ChatRole.USER, content = INTENT_NUDGE)
+                continue
+            }
             if (calls.isEmpty()) {
                 if (visible.isBlank()) {
                     if (++emptyReplies > limits.maxEmptyReplies) return CodingOutcome.Failed("The model produced no output.")
@@ -161,8 +170,13 @@ class CodingAgent(
             session.messages += ChatMessage(role = ChatRole.ASSISTANT, content = visible.substringUpToLastCall())
 
             val results = mutableListOf<Pair<ToolCall, ToolResult>>()
-            for (call in calls.take(limits.maxToolCallsPerStep)) {
+            for ((index, call) in calls.withIndex()) {
                 if (control.cancelled) return CodingOutcome.Cancelled
+                if (index >= limits.maxToolCallsPerStep) {
+                    results += call to ToolResult(call.name, false,
+                        "Error: not run. At most ${limits.maxToolCallsPerStep} tool calls per reply; make this call in your next reply.")
+                    continue
+                }
                 listener.onToolCall(call)
                 val key = call.name + call.arguments.toSortedMap().toString()
                 val repeated = lastSeen.put(key, step)?.let { step - it <= limits.repeatWindow } == true
@@ -171,12 +185,16 @@ class CodingAgent(
                         "Error: unknown tool '${call.name}'. Available tools: ${toolSpecs.joinToString(", ") { it.name }}.")
                     repeated && call.name != "terminal_run" -> ToolResult(call.name, false,
                         "Error: you already made this exact call and have its result above. Use that result, try something different, or answer now.")
-                    else -> tools.execute(call, ToolExecutionContext(env))
+                    else -> try {
+                        tools.execute(call, ToolExecutionContext(env))
+                    } catch (e: Exception) {
+                        ToolResult(call.name, false, "Error: ${call.name} failed: ${e.message ?: e.javaClass.simpleName}")
+                    }
                 }
                 listener.onToolResult(call, result)
                 results += call to result
             }
-            session.messages += ChatMessage(role = ChatRole.TOOL, content = formatResults(results, config))
+            session.messages += ChatMessage(role = ChatRole.TOOL, content = formatResults(results, system, config))
         }
         return CodingOutcome.StepLimit(limits.maxSteps)
     }
@@ -242,19 +260,36 @@ class CodingAgent(
         return if (close >= 0) substring(0, close + "</tool_call>".length) else this
     }
 
-    private fun formatResults(results: List<Pair<ToolCall, ToolResult>>, config: BackendConfig): String {
-        val cap = resultCap(config)
+    private fun formatResults(results: List<Pair<ToolCall, ToolResult>>, system: String, config: BackendConfig): String {
+        // The results of one reply share half of what the history may hold, so none of them crowds out the rest.
+        val cap = minOf(resultCap(config), (historyBudget(system, config) / 2 / results.size.coerceAtLeast(1))).coerceAtLeast(MIN_RESULT_CHARS)
         return results.joinToString("\n\n") { (call, result) ->
-            val body = result.content.ifBlank { "(no output)" }
-            val shown = if (body.length > cap) body.take(cap) + "\n[… ${body.length - cap} more characters not shown]" else body
+            val shown = clip(call, result.content.ifBlank { "(no output)" }, cap)
             val text = if (!result.success && !shown.startsWith("Error")) "Error: $shown" else shown
             "<tool_result name=\"${call.name}\">\n$text\n</tool_result>"
         }
     }
 
+    /** Cuts [body] to [cap] characters at a line boundary and says how to get the rest. */
+    private fun clip(call: ToolCall, body: String, cap: Int): String {
+        if (body.length <= cap) return body
+        val cut = body.lastIndexOf('\n', cap).takeIf { it > cap / 2 } ?: cap
+        val shown = body.substring(0, cut)
+        if (call.name == "read_file") {
+            val first = call.arguments["offset"]?.toIntOrNull()?.coerceAtLeast(1) ?: 1
+            val last = first + shown.count { it == '\n' }
+            return "$shown\n[… cut to fit: showing lines $first-$last. Call read_file with offset=${last + 1} to continue, or search_code to find what you need.]"
+        }
+        return "$shown\n[… ${body.length - cut} more characters not shown]"
+    }
+
     // ── Context ──────────────────────────────────────────────────────────────
 
     private fun outputReserve(config: BackendConfig) = minOf(config.maxTokens, config.contextLength / 4)
+
+    /** Characters the conversation may take next to [system], leaving the output allowance free. */
+    private fun historyBudget(system: String, config: BackendConfig): Int =
+        ((config.contextLength - outputReserve(config)) * CHARS_PER_TOKEN * 0.8).toInt() - system.length
 
     /** Output allowance for one request: what the context still has room for after the prompt. */
     private fun outputTokens(config: BackendConfig, promptChars: Int): Int {
@@ -271,13 +306,13 @@ class CodingAgent(
      */
     internal fun fitHistory(all: List<ChatMessage>, system: String, config: BackendConfig): List<ChatMessage> {
         // The runtime counts the whole output allowance against the context, so it has to stay free.
-        val reserved = outputReserve(config)
-        val budget = ((config.contextLength - reserved) * CHARS_PER_TOKEN * 0.8).toInt() - system.length
+        val budget = historyBudget(system, config)
         val messages = all.toMutableList()
         fun size() = messages.sumOf { it.content.length }
 
         // 1. Shrink tool output, oldest first, sparing the newest results as long as possible.
-        for (keep in intArrayOf(KEEP_RECENT_RESULTS, 1, 0)) {
+        // The newest results are never stubbed: the model has to see what it just asked for.
+        for (keep in intArrayOf(KEEP_RECENT_RESULTS, 1)) {
             if (size() <= budget) break
             val toolIdx = messages.indices.filter { messages[it].role == ChatRole.TOOL }
             for (i in toolIdx.dropLast(keep)) {
@@ -320,7 +355,7 @@ class CodingAgent(
         appendLine()
         appendLine("# How to work")
         appendLine("- Look before you answer or edit. Use the tools to find and read the real code; never guess file names, paths or contents.")
-        appendLine("- Start from what is relevant: list_files for the layout, search_code / search_filenames to locate things, read_file to read them. Read a file before you change it.")
+        appendLine("- Start from what is relevant: list_files for the layout, search_code / search_filenames to locate things, read_file to read them. Read a file before you change it. Make at most 3 tool calls per reply; long files come back in parts (use read_file offset to continue). Prefer your project's own source over vendored or third-party directories.")
         appendLine("- Change code with replace_in_file: oldText must be copied EXACTLY from the file (read it first) and be small but unique. Use write_file only to rewrite a whole file and create_file for a new one. The user approves every edit, and you are told the outcome.")
         appendLine("- Never conclude something is missing after one failed search: try other terms, or read the file that most likely contains it, before you answer.")
         appendLine("- After a change, check it when you can (terminal_run with the project's build or test command) and fix what breaks.")
@@ -362,6 +397,11 @@ class CodingAgent(
         /** Source code tokenizes at roughly 2.5-3 characters per token; assume the denser one. */
         const val CHARS_PER_TOKEN = 2.5
         const val MAX_MALFORMED = 2
+        const val MAX_INTENT_NUDGES = 2
+        const val INTENT_MAX_CHARS = 500
+        const val INTENT_NUDGE = "Go ahead: make the tool call now to do that, or, if you already have what you need, give your final answer."
+        /** A reply that only says what the model is about to do. */
+        val INTENT = Regex("""^\s*(let me|let's|i('ll| will)|now,? (let me|i)|next,? (let me|i))\b""", RegexOption.IGNORE_CASE)
         const val OUTPUT_MARGIN_TOKENS = 256
         const val MIN_OUTPUT_TOKENS = 512
         const val RETRY_NUDGE = "Your last reply was cut off. Reply again: first one short sentence about what you are doing, then the tool call."
@@ -370,6 +410,7 @@ class CodingAgent(
         const val MAX_AGENT_TEMPERATURE = 0.3
         const val KEEP_RECENT_RESULTS = 3
         const val MIN_KEPT_CHARS = 1_000
+        const val MIN_RESULT_CHARS = 1_500
         const val OVERVIEW_MAX_LINES = 40
         const val STUB = "[earlier tool output removed to save context; call the tool again if you need it]"
         val MENTION = Regex("""@\{([^}\s]+)}|(?<![\w@])@([\w./-]*[\w-]\.\w+)""")

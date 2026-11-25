@@ -83,6 +83,9 @@ class CliApp(
             current.set(control)
             val outcome = try {
                 agent.run(chat, prompt, handle.config, view, control)
+            } catch (e: Exception) {
+                // One broken task must not end the session (and the conversation with it).
+                CodingOutcome.Failed("${e.javaClass.simpleName}: ${e.message ?: "unexpected failure"}")
             } finally {
                 current.set(null)
                 view.finish()

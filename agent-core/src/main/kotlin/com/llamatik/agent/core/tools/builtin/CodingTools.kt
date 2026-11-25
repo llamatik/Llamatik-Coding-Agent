@@ -8,7 +8,7 @@ object CodingTools {
         ToolSpec("list_files", "List the files under a directory (omit path for the project root).", "path (optional)"),
         ToolSpec("search_code", "Find the files whose contents contain a text (case-insensitive).", "query"),
         ToolSpec("search_filenames", "Find files by all or part of their name.", "query"),
-        ToolSpec("read_file", "Read a file.", "path"),
+        ToolSpec("read_file", "Read a file (long files come back in parts).", "path, offset (optional first line), limit (optional number of lines)"),
         ToolSpec("replace_in_file", "Edit an existing file by replacing text. Preferred way to change code.", "path, oldText (exact text from the file), newText"),
         ToolSpec("write_file", "Replace a whole file with new content.", "path, content"),
         ToolSpec("create_file", "Create a new file.", "path, content"),
