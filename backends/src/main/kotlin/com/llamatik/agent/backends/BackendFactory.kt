@@ -19,11 +19,14 @@ data class InferenceParams(
     val gpuLayers: Int = if (System.getProperty("os.name").contains("Mac", ignoreCase = true)) -1 else 0,
     val flashAttention: Boolean = false,
     val useMmap: Boolean = true,
+    val topP: Double = 0.95,
+    val topK: Int = 40,
+    val repeatPenalty: Double = 1.1,
 ) {
     fun toConfig(modelLabel: String) = BackendConfig(
         modelIdOrPath = modelLabel, temperature = temperature, maxTokens = maxTokens, contextLength = contextSize,
         numThreads = threads, useMmap = useMmap, flashAttention = flashAttention, batchSize = batchSize,
-        gpuLayers = gpuLayers, localOnly = true,
+        gpuLayers = gpuLayers, localOnly = true, topP = topP, topK = topK, repeatPenalty = repeatPenalty,
     )
 }
 

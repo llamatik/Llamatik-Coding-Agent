@@ -229,9 +229,9 @@ class LocalLlamaBackend(
     private fun applySampling(config: BackendConfig) = LlamaBridge.updateGenerateParams(
         temperature = config.temperature.toFloat(),
         maxTokens = config.maxTokens,
-        topP = 0.95f,
-        topK = 40,
-        repeatPenalty = 1.1f,
+        topP = config.topP.toFloat(),
+        topK = config.topK,
+        repeatPenalty = config.repeatPenalty.toFloat(),
         contextLength = config.contextLength,
         numThreads = config.numThreads,
         useMmap = config.useMmap,

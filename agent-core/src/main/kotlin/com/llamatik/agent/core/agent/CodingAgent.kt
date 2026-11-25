@@ -78,6 +78,16 @@ data class CodingLimits(
     val maxEmptyReplies: Int = 2,
     /** The same call made again within this many steps is answered with a nudge instead of being run again. */
     val repeatWindow: Int = 2,
+    /** Sampling temperature is capped to this while the agent works: tool calls are more reliable when it is low. */
+    val temperatureCap: Double = 0.3,
+    /** Source code tokenizes at roughly 2.5-3 characters per token; the lower value is the safe one. Sizes the budgets. */
+    val charsPerToken: Double = 2.5,
+    /** Let reasoning models think before each reply (slower, usually better plans). */
+    val thinking: Boolean = false,
+    /** Largest tool result sent to the model, in characters (also limited to a fifth of the context window). */
+    val maxResultChars: Int = 16_000,
+    /** Share of the context window kept free for the reply, at most (the reply is also capped to what fits). */
+    val outputReserveShare: Double = 0.25,
 )
 
 /**
@@ -109,7 +119,7 @@ class CodingAgent(
         session.messages += ChatMessage(role = ChatRole.USER, content = withAttachments(userPrompt, config))
         val system = buildSystemPrompt()
         // Tool calling is more reliable when sampling is not too loose.
-        val genConfig = config.copy(temperature = minOf(config.temperature, MAX_AGENT_TEMPERATURE))
+        val genConfig = config.copy(temperature = minOf(config.temperature, limits.temperatureCap))
         // Step at which each call was last made: a repeat is only pointless while its result is still in view.
         val lastSeen = HashMap<String, Int>()
         var emptyReplies = 0
@@ -124,7 +134,7 @@ class CodingAgent(
             val messages = fitHistory(session.messages, system, config) + listOfNotNull(nudge)
             nudge = null
             val stepConfig = genConfig.copy(maxTokens = outputTokens(genConfig, system.length + messages.sumOf { it.content.length }))
-            listener.onPrompt(((system.length + messages.sumOf { it.content.length }) / CHARS_PER_TOKEN).toInt())
+            listener.onPrompt(((system.length + messages.sumOf { it.content.length }) / limits.charsPerToken).toInt())
             listener.onGenerating(step)
             val reply = try {
                 generate(system, messages, stepConfig, listener, control)
@@ -217,7 +227,7 @@ class CodingAgent(
         // A backend may deliver the reply in one piece (no token stream): show it from the final text then.
         var streamed = false
         val handle = backend.generate(
-            GenerationRequest(system, messages, config, noThink = true, sessionTag = SessionTag.AGENT),
+            GenerationRequest(system, messages, config, noThink = !limits.thinking, sessionTag = SessionTag.AGENT),
             object : GenerationCallbacks {
                 override fun onToken(token: String) {
                     if (control.cancelled) return
@@ -285,20 +295,20 @@ class CodingAgent(
 
     // ── Context ──────────────────────────────────────────────────────────────
 
-    private fun outputReserve(config: BackendConfig) = minOf(config.maxTokens, config.contextLength / 4)
+    private fun outputReserve(config: BackendConfig) = minOf(config.maxTokens, (config.contextLength * limits.outputReserveShare).toInt())
 
     /** Characters the conversation may take next to [system], leaving the output allowance free. */
     private fun historyBudget(system: String, config: BackendConfig): Int =
-        ((config.contextLength - outputReserve(config)) * CHARS_PER_TOKEN * 0.8).toInt() - system.length
+        ((config.contextLength - outputReserve(config)) * limits.charsPerToken * 0.8).toInt() - system.length
 
     /** Output allowance for one request: what the context still has room for after the prompt. */
     private fun outputTokens(config: BackendConfig, promptChars: Int): Int {
-        val room = config.contextLength - (promptChars / CHARS_PER_TOKEN).toInt() - OUTPUT_MARGIN_TOKENS
+        val room = config.contextLength - (promptChars / limits.charsPerToken).toInt() - OUTPUT_MARGIN_TOKENS
         return minOf(config.maxTokens, room).coerceAtLeast(MIN_OUTPUT_TOKENS)
     }
 
     /** Room for one tool result: a fifth of the context window, at most 16K characters. */
-    private fun resultCap(config: BackendConfig) = (config.contextLength * CHARS_PER_TOKEN / 5).toInt().coerceIn(3_000, 16_000)
+    private fun resultCap(config: BackendConfig) = (config.contextLength * limits.charsPerToken / 5).toInt().coerceIn(MIN_RESULT_CHARS, limits.maxResultChars.coerceAtLeast(MIN_RESULT_CHARS))
 
     /**
      * The conversation as it goes to the model: when it would not fit, old tool results shrink to a stub
@@ -394,8 +404,6 @@ class CodingAgent(
     }
 
     private companion object {
-        /** Source code tokenizes at roughly 2.5-3 characters per token; assume the denser one. */
-        const val CHARS_PER_TOKEN = 2.5
         const val MAX_MALFORMED = 2
         const val MAX_INTENT_NUDGES = 2
         const val INTENT_MAX_CHARS = 500
@@ -407,7 +415,6 @@ class CodingAgent(
         const val RETRY_NUDGE = "Your last reply was cut off. Reply again: first one short sentence about what you are doing, then the tool call."
         /** The tail of a tool call whose opening was lost: a closing tag with nothing opened before it. */
         val LOST_OPENING = Regex("""^(?![\s\S]*<tool_call)[\s\S]*</(arg|tool_call)>""", RegexOption.IGNORE_CASE)
-        const val MAX_AGENT_TEMPERATURE = 0.3
         const val KEEP_RECENT_RESULTS = 3
         const val MIN_KEPT_CHARS = 1_000
         const val MIN_RESULT_CHARS = 1_500

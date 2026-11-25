@@ -62,6 +62,7 @@ class CliApp(
                 tools = executor,
                 toolSpecs = CodingTools.specs,
                 sources = FilePromptSources(env, "terminal", options.aggressive),
+                limits = options.limits,
             )
             val session = Session(agent, handle)
             return if (options.prompt != null) {
@@ -187,7 +188,8 @@ class CliApp(
 
     private fun interactive(session: Session, backend: BackendHandle): Int {
         terminal.println(terminal.style(Style.BOLD, "Llamatik Code") + terminal.style(Style.DIM, " — ${backend.description}"))
-        terminal.println(terminal.style(Style.DIM, "Project: ${options.workDir}   /help for commands, @path to attach a file, /exit to quit"))
+        options.configWarnings.forEach { terminal.println(terminal.style(Style.YELLOW, "warning: $it")) }
+        terminal.println(terminal.style(Style.DIM, "Project: ${options.workDir}   /help for commands, @path to attach a file, /config for settings, /exit to quit"))
         while (true) {
             val line = terminal.readLine(terminal.style(Style.GREEN, "\n> ")) ?: return 0
             val text = line.trim()
@@ -195,6 +197,7 @@ class CliApp(
                 text.isEmpty() -> continue
                 text == "/exit" || text == "/quit" || text == "exit" || text == "quit" -> return 0
                 text == "/help" -> terminal.println(CliArgs.USAGE.substringAfter("In a session: ").let { "In a session: $it" })
+                text == "/config" -> terminal.println(describeSettings(backend))
                 text == "/clear" -> { session.chat = ChatSession(); terminal.println(terminal.style(Style.DIM, "Conversation cleared.")) }
                 text == "/yes" -> {
                     permissions.autoApprove = !permissions.autoApprove
@@ -204,6 +207,22 @@ class CliApp(
                 else -> session.runTask(text)
             }
         }
+    }
+
+    /** What the session runs with, and where each setting can be changed. */
+    private fun describeSettings(backend: BackendHandle): String {
+        val c = backend.config
+        val l = options.limits
+        val files = if (options.configFiles.isEmpty()) "none (create ~/.llamatik/settings.json or <project>/.llamatik/settings.json)" else options.configFiles.joinToString(", ")
+        return listOf(
+            "Settings files: $files",
+            "inference: temperature=${c.temperature} maxTokens=${c.maxTokens} contextSize=${c.contextLength} batchSize=${c.batchSize} " +
+                "topP=${c.topP} topK=${c.topK} repeatPenalty=${c.repeatPenalty} threads=${c.numThreads} gpuLayers=${c.gpuLayers} " +
+                "flashAttention=${c.flashAttention} useMmap=${c.useMmap}",
+            "agent: maxSteps=${l.maxSteps} maxToolCallsPerStep=${l.maxToolCallsPerStep} temperature(cap)=${l.temperatureCap} " +
+                "charsPerToken=${l.charsPerToken} thinking=${l.thinking} maxResultChars=${l.maxResultChars} outputReserveShare=${l.outputReserveShare}",
+            "auto-approve: ${permissions.autoApprove}",
+        ).joinToString("\n")
     }
 
     companion object {

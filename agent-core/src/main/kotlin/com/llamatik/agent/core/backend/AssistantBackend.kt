@@ -14,6 +14,12 @@ data class BackendConfig(
     /** Number of model layers to offload to GPU. 0 = CPU only, -1 = all layers. */
     val gpuLayers: Int = 0,
     val localOnly: Boolean,
+    /** Nucleus sampling: only the smallest set of tokens whose probabilities add up to this is considered. */
+    val topP: Double = 0.95,
+    /** Only the [topK] most likely tokens are considered at each step. */
+    val topK: Int = 40,
+    /** Above 1.0 discourages repeating tokens already generated. */
+    val repeatPenalty: Double = 1.1,
 )
 
 enum class SessionTag { AGENT, CHAT, BENCHMARK }

@@ -20,6 +20,14 @@ fun main(args: Array<String>) {
     // The backend logs "Model loaded" at INFO; on a live terminal that line lands in the middle of the status line.
     if (!options.debug && !options.nativeLogs) quietLogger.level = java.util.logging.Level.WARNING
     val terminal = SystemTerminal()
+    if (!options.help && !options.version) {
+        options = try {
+            options.withSettings(SettingsLoader.load(java.nio.file.Path.of(System.getProperty("user.home")), options.workDir, options.configFile))
+        } catch (e: SettingsException) {
+            terminal.error(terminal.style(Style.RED, "error: ${e.message}"))
+            exitProcess(2)
+        }
+    }
     if (options.discover && !options.help && !options.version) {
         when (val picked = ServerPicker(terminal).pick()) {
             is ServerPicker.Result.Picked -> options = options.copy(server = picked.address, discover = false)

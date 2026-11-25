@@ -20,7 +20,7 @@ dependencies {
     implementation(libs.mordant)
 
     // JmDNS (server discovery) logs through SLF4J; silence the "no provider" notice.
-    runtimeOnly(libs.gson)
+    implementation(libs.gson)
     runtimeOnly(libs.slf4j.nop)
 
     testImplementation(libs.junit)

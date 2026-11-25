@@ -78,6 +78,50 @@ cli/build/install/llamatik/bin/llamatik -m model.gguf -p "Explain this project"
 
 For editors, point your ACP client at `acp/build/install/llamatik-acp/bin/llamatik-acp` (same `--model` / `--server` options).
 
+### Settings file
+
+Like Claude Code, the CLI reads JSON settings files; later ones win, and command-line flags win over all of them:
+
+| File | Purpose |
+|---|---|
+| `~/.llamatik/settings.json` | your defaults for every project |
+| `<project>/.llamatik/settings.json` | shared with the project (commit it) |
+| `<project>/.llamatik/settings.local.json` | yours, for this project only (keep it out of git) |
+| `--config <file>` | one more file, read last |
+
+`//` and `#` comments are allowed. Type `/config` in a session to see what is in effect.
+
+```jsonc
+{
+  "model": "~/.llamatik/models/Qwen3-14B-Q8_0.gguf",   // or "server": "192.168.1.20" (not both)
+  "inference": {                // the options of the Llamatik app
+    "temperature": 0.7,         // 0 - 2
+    "maxTokens": 8192,          // largest reply
+    "contextSize": 16384,       // context window in tokens: raise it if the agent runs out of room
+    "batchSize": 2048,
+    "topP": 0.95,
+    "topK": 40,
+    "repeatPenalty": 1.1,
+    "threads": 8,
+    "gpuLayers": -1,            // 0 = CPU only, -1 = all layers
+    "flashAttention": false,
+    "useMmap": true
+  },
+  "agent": {                    // how the agent loop budgets its work
+    "maxSteps": 30,             // model calls per task
+    "maxToolCallsPerStep": 3,   // tool calls run per reply
+    "temperature": 0.3,         // sampling temperature is capped to this while the agent works
+    "charsPerToken": 2.5,       // lower = more cautious prompt sizing (source code is ~2.5-3)
+    "maxResultChars": 16000,    // largest tool result sent to the model
+    "outputReserveShare": 0.25, // share of the context kept free for the reply
+    "thinking": false           // let reasoning models think before each reply (slower)
+  },
+  "permissions": { "autoApprove": false }
+}
+```
+
+If a task fails with a "context full" error or the agent forgets what it read, raise `inference.contextSize` (the model must support it) or lower `agent.maxResultChars`.
+
 ---
 
 ## 📦 Use the libraries

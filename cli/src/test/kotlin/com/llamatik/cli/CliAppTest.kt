@@ -197,3 +197,20 @@ class CliAppTest {
         assertFalse("nothing is running any more", app.cancelCurrent())
     }
 }
+
+class CliConfigCommandTest {
+    @get:org.junit.Rule val tmp = org.junit.rules.TemporaryFolder()
+
+    @Test
+    fun `config shows the settings in effect`() {
+        val params = InferenceParams(contextSize = 32768, topK = 12, maxTokens = 512, threads = 1)
+        val handle = BackendHandle(FakeBackend(), params.toConfig("fake"), "fake backend")
+        val t = ScriptedTerminal("/config", "/exit")
+        val options = CliOptions(workDir = tmp.newFolder().toPath(), configFiles = listOf("/x/settings.json"), configWarnings = listOf("f.json: unknown setting \"modle\" ignored"))
+        CliApp(options, t) { handle }.run()
+        assertTrue(t.out.contains("contextSize=32768"))
+        assertTrue(t.out.contains("topK=12"))
+        assertTrue(t.out.contains("/x/settings.json"))
+        assertTrue(t.out.contains("unknown setting \"modle\""))
+    }
+}
