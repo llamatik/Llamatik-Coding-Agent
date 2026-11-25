@@ -6,7 +6,7 @@ import com.llamatik.agent.core.agent.ToolSpec
 object CodingTools {
     val specs: List<ToolSpec> = listOf(
         ToolSpec("list_files", "List the files under a directory (omit path for the project root).", "path (optional)"),
-        ToolSpec("search_code", "Find the files whose contents contain a text (case-insensitive).", "query"),
+        ToolSpec("search_code", "Find where a text appears: shows file:line and the matching line (case-insensitive).", "query"),
         ToolSpec("search_filenames", "Find files by all or part of their name.", "query"),
         ToolSpec("read_file", "Read a file (long files come back in parts).", "path, offset (optional first line), limit (optional number of lines)"),
         ToolSpec("replace_in_file", "Edit an existing file by replacing text. Preferred way to change code.", "path, oldText (exact text from the file), newText"),
@@ -18,5 +18,7 @@ object CodingTools {
     )
 
     /** Instances of the tools above, for a [ToolListExecutor]. */
-    fun tools() = BuiltinTools.all().filter { tool -> specs.any { it.name == tool.name } }
+    fun tools() = BuiltinTools.all()
+        .filter { tool -> specs.any { it.name == tool.name } }
+        .map { if (it.name == "search_code") SearchCodeLinesTool() else it }
 }

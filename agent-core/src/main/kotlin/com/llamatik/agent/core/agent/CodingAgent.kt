@@ -76,6 +76,10 @@ data class CodingLimits(
     val maxToolCallsPerStep: Int = 3,
     /** Blank replies tolerated in a row before giving up. */
     val maxEmptyReplies: Int = 2,
+    /** Steps spent only reading and searching, without an edit or a command, before the agent is told to stop exploring. */
+    val maxExploreSteps: Int = 8,
+    /** Calls repeated from earlier in the run (their output was shortened away) before the agent is told to stop exploring. */
+    val maxReReads: Int = 3,
     /** The same call made again within this many steps is answered with a nudge instead of being run again. */
     val repeatWindow: Int = 2,
     /** Sampling temperature is capped to this while the agent works: tool calls are more reliable when it is low. */
@@ -127,10 +131,21 @@ class CodingAgent(
         var intentNudges = 0
         var nudge: ChatMessage? = null
         var step = 0
+        // Run-level brakes against endless exploring (see EXPLORE_BRAKE).
+        var reReads = 0
+        var exploring = 0
+        var braked = false
+        var stepsAfterBrake = 0
+        var forceAnswer = false
+        // A request to change code that ends in a description of the change has not been carried out.
+        var everActed = false
+        var actionNudges = 0
+        val wantsChange = WANTS_CHANGE.containsMatchIn(userPrompt) && !QUESTION.containsMatchIn(userPrompt.trim())
 
         while (step < limits.maxSteps) {
             if (control.cancelled) return CodingOutcome.Cancelled
             step++
+            if (forceAnswer) nudge = ChatMessage(role = ChatRole.USER, content = FINAL_NUDGE)
             val messages = fitHistory(session.messages, system, config) + listOfNotNull(nudge)
             nudge = null
             val stepConfig = genConfig.copy(maxTokens = outputTokens(genConfig, system.length + messages.sumOf { it.content.length }))
@@ -149,6 +164,13 @@ class CodingAgent(
             if (control.cancelled) return CodingOutcome.Cancelled
 
             val visible = ToolCallParser.stripThinking(reply).trim()
+            if (forceAnswer) {
+                // Tool calls are no longer wanted: whatever the model said before them is its answer.
+                val answer = visible.substringBefore("<tool_call").trim().ifBlank { GAVE_UP_ANSWER }
+                session.messages += ChatMessage(role = ChatRole.ASSISTANT, content = answer)
+                if (answer == GAVE_UP_ANSWER) listener.onText(answer)
+                return CodingOutcome.Done
+            }
             val calls = parseCalls(visible)
             if (calls.isEmpty() && LOST_OPENING.containsMatchIn(visible) && malformedReplies < MAX_MALFORMED) {
                 // The reply began with a tool call whose opening never arrived (see AgentStreamFilter): ask again.
@@ -173,6 +195,12 @@ class CodingAgent(
                     continue
                 }
                 session.messages += ChatMessage(role = ChatRole.ASSISTANT, content = visible)
+                if (wantsChange && !everActed && actionNudges < MAX_ACTION_NUDGES && step < limits.maxSteps) {
+                    actionNudges++
+                    session.messages += ChatMessage(role = ChatRole.USER, content = ACTION_NUDGE)
+                    exploring = 0; reReads = 0; braked = false; stepsAfterBrake = 0
+                    continue
+                }
                 return CodingOutcome.Done
             }
             emptyReplies = 0
@@ -189,7 +217,9 @@ class CodingAgent(
                 }
                 listener.onToolCall(call)
                 val key = call.name + call.arguments.toSortedMap().toString()
-                val repeated = lastSeen.put(key, step)?.let { step - it <= limits.repeatWindow } == true
+                val previous = lastSeen.put(key, step)
+                val repeated = previous != null && step - previous <= limits.repeatWindow
+                if (previous != null && call.name !in ACTION_TOOLS) reReads++
                 val result = when {
                     call.name !in toolNames -> ToolResult(call.name, false,
                         "Error: unknown tool '${call.name}'. Available tools: ${toolSpecs.joinToString(", ") { it.name }}.")
@@ -204,7 +234,19 @@ class CodingAgent(
                 listener.onToolResult(call, result)
                 results += call to result
             }
-            session.messages += ChatMessage(role = ChatRole.TOOL, content = formatResults(results, system, config))
+            // Progress is a change or a command; anything else is exploration.
+            val acted = results.any { (call, r) -> r.success && call.name in ACTION_TOOLS && !r.content.startsWith("No change") }
+            if (acted) everActed = true
+            if (acted) { exploring = 0; reReads = 0; braked = false; stepsAfterBrake = 0 } else exploring++
+            var text = formatResults(results, system, config)
+            if (!braked && !acted && (exploring >= limits.maxExploreSteps || reReads >= limits.maxReReads)) {
+                braked = true
+                stepsAfterBrake = 0
+                text += "\n\n" + EXPLORE_BRAKE
+            } else if (braked && !acted && ++stepsAfterBrake >= BRAKE_PATIENCE) {
+                forceAnswer = true
+            }
+            session.messages += ChatMessage(role = ChatRole.TOOL, content = text)
         }
         return CodingOutcome.StepLimit(limits.maxSteps)
     }
@@ -276,21 +318,49 @@ class CodingAgent(
         return results.joinToString("\n\n") { (call, result) ->
             val shown = clip(call, result.content.ifBlank { "(no output)" }, cap)
             val text = if (!result.success && !shown.startsWith("Error")) "Error: $shown" else shown
-            "<tool_result name=\"${call.name}\">\n$text\n</tool_result>"
+            "<tool_result name=\"${call.name}\"${argAttribute(call)}>\n$text\n</tool_result>"
         }
     }
 
-    /** Cuts [body] to [cap] characters at a line boundary and says how to get the rest. */
+    /** The main argument of a call (path, query, command), recorded in its result so a shortened result still says what it was. */
+    private fun argAttribute(call: ToolCall): String {
+        val main = call.arguments["path"] ?: call.arguments["query"] ?: call.arguments["command"] ?: return ""
+        return " arg=\"${main.lineSequence().first().take(120).replace("\"", "'")}\""
+    }
+
+    /** Cuts [body] to [cap] characters and says how to get to the rest. */
     private fun clip(call: ToolCall, body: String, cap: Int): String {
         if (body.length <= cap) return body
+        val wholeFile = call.name == "read_file" && call.arguments["offset"] == null && call.arguments["limit"] == null
+        if (wholeFile) return outline(body, cap)
         val cut = body.lastIndexOf('\n', cap).takeIf { it > cap / 2 } ?: cap
         val shown = body.substring(0, cut)
         if (call.name == "read_file") {
             val first = call.arguments["offset"]?.toIntOrNull()?.coerceAtLeast(1) ?: 1
             val last = first + shown.count { it == '\n' }
-            return "$shown\n[… cut to fit: showing lines $first-$last. Call read_file with offset=${last + 1} to continue, or search_code to find what you need.]"
+            return "$shown\n[… cut to fit: showing lines $first-$last. Call read_file with offset=${last + 1} to continue.]"
         }
         return "$shown\n[… ${body.length - cut} more characters not shown]"
+    }
+
+    /**
+     * A file too big to send whole: its first lines and a numbered map of its declarations, which is what a
+     * person would look at first. Paging through thousands of lines costs a step per screen and finds nothing.
+     */
+    private fun outline(body: String, cap: Int): String {
+        val lines = body.lines()
+        val head = lines.take(OUTLINE_HEAD_LINES).joinToString("\n").take(cap / 4)
+        val header = "[The file has ${lines.size} lines, too many to show at once. First lines, then a map of its declarations as L<line>. " +
+            "To see a part, call read_file with offset=<line> and limit=<lines>; to find something by name, use search_code.]\n"
+        var room = cap - header.length - head.length - 32
+        val map = StringBuilder()
+        for ((i, line) in lines.withIndex()) {
+            if (!DECLARATION.containsMatchIn(line)) continue
+            val entry = "L${i + 1} ${line.trim().take(OUTLINE_ENTRY_CHARS)}\n"
+            if (entry.length > room) { map.append("… (map cut; search_code finds the rest)"); break }
+            map.append(entry); room -= entry.length
+        }
+        return header + head + "\n…\n" + map.toString().trimEnd()
     }
 
     // ── Context ──────────────────────────────────────────────────────────────
@@ -327,7 +397,7 @@ class CodingAgent(
             val toolIdx = messages.indices.filter { messages[it].role == ChatRole.TOOL }
             for (i in toolIdx.dropLast(keep)) {
                 if (size() <= budget) break
-                if (messages[i].content.length > STUB.length) messages[i] = messages[i].copy(content = STUB)
+                messages[i] = messages[i].copy(content = shorten(messages[i].content))
             }
         }
         // 2. Drop earlier turns, but never the task being worked on (the latest user message).
@@ -344,6 +414,32 @@ class CodingAgent(
             messages[i] = messages[i].copy(content = messages[i].content.take(keep) + "\n[… cut to fit the context]")
         }
         return messages
+    }
+
+    /**
+     * What stays of an old tool result: not the content, but enough to know it was seen and where things are
+     * (a file's declarations, the first search hits). Without that the model forgets and reads everything again.
+     */
+    internal fun shorten(content: String): String {
+        if (SHORTENED in content) return content
+        val results = RESULT.findAll(content).toList()
+        if (results.isEmpty()) return if (content.length > STUB.length) STUB else content
+        val digest = results.joinToString("\n\n") { m ->
+            val name = m.groupValues[1]
+            val arg = m.groupValues[2]
+            val lines = m.groupValues[3].lines()
+            val body = when (name) {
+                "read_file" -> {
+                    val outline = lines.filter { DECLARATION.containsMatchIn(it) }.map { it.trim().take(100) }.distinct().take(OUTLINE_LINES)
+                    "${lines.size} lines." + if (outline.isEmpty()) "" else " Declarations:\n" + outline.joinToString("\n") { "  $it" }
+                }
+                "search_code", "search_filenames", "list_files" ->
+                    lines.take(DIGEST_LINES).joinToString("\n") + if (lines.size > DIGEST_LINES) "\n… (${lines.size} lines in all)" else ""
+                else -> m.groupValues[3].take(200)
+            }
+            "<tool_result name=\"$name\"${if (arg.isNotEmpty()) " arg=\"$arg\"" else ""}>\n$SHORTENED\n$body\n</tool_result>"
+        }
+        return if (digest.length < content.length) digest else content
     }
 
     /** Expands `@path` / `@{path}` mentions of project files into the message, as the user attached them. */
@@ -365,7 +461,7 @@ class CodingAgent(
         appendLine()
         appendLine("# How to work")
         appendLine("- Look before you answer or edit. Use the tools to find and read the real code; never guess file names, paths or contents.")
-        appendLine("- Start from what is relevant: list_files for the layout, search_code / search_filenames to locate things, read_file to read them. Read a file before you change it. Make at most 3 tool calls per reply; long files come back in parts (use read_file offset to continue). Prefer your project's own source over vendored or third-party directories.")
+        appendLine("- Start from what is relevant: list_files for the layout, search_code / search_filenames to locate things, read_file to read them. Read a file before you change it. Do not read a file twice: older tool output is shortened to a summary, which is enough to remember what is where. As soon as you know where to change something, make the change. Make at most 3 tool calls per reply; a long file comes back as a map of its declarations with line numbers: find what you need with search_code (it gives file:line), then read_file with offset and limit. Prefer your project's own source over vendored or third-party directories.")
         appendLine("- Change code with replace_in_file: oldText must be copied EXACTLY from the file (read it first) and be small but unique. Use write_file only to rewrite a whole file and create_file for a new one. The user approves every edit, and you are told the outcome.")
         appendLine("- Never conclude something is missing after one failed search: try other terms, or read the file that most likely contains it, before you answer.")
         appendLine("- After a change, check it when you can (terminal_run with the project's build or test command) and fix what breaks.")
@@ -417,6 +513,24 @@ class CodingAgent(
         val LOST_OPENING = Regex("""^(?![\s\S]*<tool_call)[\s\S]*</(arg|tool_call)>""", RegexOption.IGNORE_CASE)
         const val KEEP_RECENT_RESULTS = 3
         const val MIN_KEPT_CHARS = 1_000
+        const val BRAKE_PATIENCE = 2
+        const val OUTLINE_LINES = 14
+        const val OUTLINE_HEAD_LINES = 25
+        const val OUTLINE_ENTRY_CHARS = 90
+        const val DIGEST_LINES = 8
+        const val SHORTENED = "[shortened to save context; call the tool again only if you need the details]"
+        val RESULT = Regex("""<tool_result name="([^"]*)"(?: arg="([^"]*)")?>\n(.*?)\n</tool_result>""", RegexOption.DOT_MATCHES_ALL)
+        val DECLARATION = Regex("""^\s*((public|private|protected|internal|abstract|open|data|sealed|suspend|override|export|default|async|static|final|inline|actual|expect)\s+)*(class|object|interface|fun|def|function|struct|trait|impl|enum|func|type)\s+\w""")
+        /** Tools whose success means work was done (as opposed to looking around). */
+        val ACTION_TOOLS = setOf("replace_in_file", "write_file", "create_file", "terminal_run")
+        const val EXPLORE_BRAKE = "You have explored enough, and you are going in circles. Stop searching. Choose the file to change, read it once only if you need its exact text for the edit, and make the change with replace_in_file or create_file. If you cannot, give your final answer: what you found and what you would change."
+        const val MAX_ACTION_NUDGES = 2
+        const val ACTION_NUDGE = "You described the change but did not make it. The user asked you to implement it: do it now. Read the file you will change (once, if you need its exact text), then use replace_in_file or create_file, and summarize when done."
+        /** The user is asking for a change to be made (as opposed to a question about the code). */
+        val WANTS_CHANGE = Regex("""\b(implement|add|create|fix|change|update|refactor|remove|rename|write|build|make|modify|replace|delete|migrate|support)\b""", RegexOption.IGNORE_CASE)
+        val QUESTION = Regex("""^(how|what|why|where|which|who|when|explain|describe|does|do|is|are|can|could|should|would)\b[^\n]*\?\s*$|\?\s*$""", RegexOption.IGNORE_CASE)
+        const val FINAL_NUDGE = "Stop using tools now. Give your final answer in plain text: what you found, what should change and where (file paths), and anything you could not do."
+        const val GAVE_UP_ANSWER = "I explored the project but could not settle on a change. Tell me which file to start from (for example with @path) and I will continue from there."
         const val MIN_RESULT_CHARS = 1_500
         const val OVERVIEW_MAX_LINES = 40
         const val STUB = "[earlier tool output removed to save context; call the tool again if you need it]"

@@ -35,6 +35,8 @@ data class CliOptions(
     /** Settings files that were read, and warnings about them, for `/config`. */
     val configFiles: List<String> = emptyList(),
     val configWarnings: List<String> = emptyList(),
+    /** Directory names the file tools skip: git submodules (vendored code) plus the `ignore` setting. */
+    val ignoredDirs: Set<String> = emptySet(),
     /** `--no-auto`: do not tune the settings to this machine. */
     val noAuto: Boolean = false,
     /** What the machine tuning chose, and why (empty when it did not run). */
@@ -69,6 +71,7 @@ fun CliOptions.withSettings(
         autoNotes = tuned?.notes.orEmpty(),
         limits = s.agent.over(agentFlags).applyTo(CodingLimits()),
         configFiles = loaded.files, configWarnings = loaded.warnings,
+        ignoredDirs = submoduleDirs(workDir) + s.ignore,
     )
 }
 
@@ -195,4 +198,14 @@ fun tuneForThisMachine(model: File, auto: AutoSettings): Suggestion? {
     } catch (_: Exception) {
         null
     }
+}
+
+/** Directory names of the git submodules of [project] (`path = ...` lines of `.gitmodules`): vendored code, not the project's own. */
+fun submoduleDirs(project: Path): Set<String> {
+    val file = project.resolve(".gitmodules").toFile()
+    if (!file.isFile) return emptySet()
+    return runCatching {
+        file.readLines().mapNotNull { Regex("""^\s*path\s*=\s*(.+?)\s*$""").find(it)?.groupValues?.get(1) }
+            .map { it.trim('/').substringAfterLast('/') }.filter { it.isNotEmpty() }.toSet()
+    }.getOrDefault(emptySet())
 }

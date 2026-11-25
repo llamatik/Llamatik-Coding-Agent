@@ -50,7 +50,7 @@ class CliApp(
             return 2
         }
         backend.use { handle ->
-            val env = AgentEnvironment.headless(options.workDir, permissions)
+            val env = AgentEnvironment.headless(options.workDir, permissions, userIgnoredDirs = { options.ignoredDirs })
             val executor = EditApplyingToolExecutor(
                 delegate = ConfirmingToolExecutor(ToolListExecutor(CodingTools.tools()), permissions),
                 env = env,
@@ -226,6 +226,7 @@ class CliApp(
             "agent: maxSteps=${l.maxSteps} maxToolCallsPerStep=${l.maxToolCallsPerStep} temperature(cap)=${l.temperatureCap} " +
                 "charsPerToken=${l.charsPerToken} thinking=${l.thinking} maxResultChars=${l.maxResultChars} outputReserveShare=${l.outputReserveShare}",
             "auto-approve: ${permissions.autoApprove}",
+            "skipped directories: ${(com.llamatik.agent.core.host.WorkspacePolicy.ALWAYS_IGNORED_DIRS + options.ignoredDirs).sorted().joinToString(", ")}",
             if (options.autoNotes.isEmpty()) "machine tuning: off (settings, flags, or a server decide)"
             else "machine tuning: " + options.autoNotes.joinToString("; "),
         ).joinToString("\n")

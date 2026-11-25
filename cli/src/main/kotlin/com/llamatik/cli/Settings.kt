@@ -53,18 +53,21 @@ data class AgentOverrides(
     val thinking: Boolean? = null,
     val maxResultChars: Int? = null,
     val outputReserveShare: Double? = null,
+    val maxExploreSteps: Int? = null,
+    val maxReReads: Int? = null,
 ) {
     fun applyTo(l: CodingLimits) = l.copy(
         maxSteps = maxSteps ?: l.maxSteps, maxToolCallsPerStep = maxToolCallsPerStep ?: l.maxToolCallsPerStep,
         temperatureCap = temperature ?: l.temperatureCap, charsPerToken = charsPerToken ?: l.charsPerToken,
         thinking = thinking ?: l.thinking, maxResultChars = maxResultChars ?: l.maxResultChars,
         outputReserveShare = outputReserveShare ?: l.outputReserveShare,
+        maxExploreSteps = maxExploreSteps ?: l.maxExploreSteps, maxReReads = maxReReads ?: l.maxReReads,
     )
 
     fun over(other: AgentOverrides) = AgentOverrides(
         other.maxSteps ?: maxSteps, other.maxToolCallsPerStep ?: maxToolCallsPerStep, other.temperature ?: temperature,
         other.charsPerToken ?: charsPerToken, other.thinking ?: thinking, other.maxResultChars ?: maxResultChars,
-        other.outputReserveShare ?: outputReserveShare,
+        other.outputReserveShare ?: outputReserveShare, other.maxExploreSteps ?: maxExploreSteps, other.maxReReads ?: maxReReads,
     )
 }
 
@@ -87,9 +90,12 @@ data class Settings(
     val inference: InferenceOverrides = InferenceOverrides(),
     val agent: AgentOverrides = AgentOverrides(),
     val auto: AutoSettings = AutoSettings(),
+    /** Directory names the file tools skip (on top of build output and git submodules). */
+    val ignore: List<String> = emptyList(),
 ) {
     /** [other] wins where it has a value. */
     fun over(other: Settings) = Settings(
+        ignore = (ignore + other.ignore).distinct(),
         model = other.model ?: model, server = other.server ?: server, autoApprove = other.autoApprove ?: autoApprove,
         inference = inference.over(other.inference), agent = agent.over(other.agent), auto = auto.over(other.auto),
     )
@@ -157,6 +163,7 @@ object SettingsLoader {
             }
             if (autoElement != null && autoFlag == null && autoObject == null) throw SettingsException("$source: \"auto\" must be true, false or an object")
             val settings = Settings(
+                ignore = stringList("ignore"),
                 auto = AutoSettings(
                     enabled = autoFlag ?: bool(autoObject, "auto", "enabled"),
                     maxContext = int(autoObject, "auto", "maxContext", 4096..Int.MAX_VALUE),
@@ -186,9 +193,11 @@ object SettingsLoader {
                     thinking = bool(agent, "agent", "thinking"),
                     maxResultChars = int(agent, "agent", "maxResultChars", 1_000..1_000_000),
                     outputReserveShare = double(agent, "agent", "outputReserveShare", 0.05..0.9),
+                    maxExploreSteps = int(agent, "agent", "maxExploreSteps", 1..1000),
+                    maxReReads = int(agent, "agent", "maxReReads", 1..1000),
                 ),
             )
-            warnUnknown(root, "", setOf("model", "server", "permissions", "inference", "agent", "auto"))
+            warnUnknown(root, "", setOf("model", "server", "permissions", "inference", "agent", "auto", "ignore"))
             return settings to warnings
         }
 
@@ -217,6 +226,14 @@ object SettingsLoader {
             val p = primitive(e, "", key, "a string")
             if (!p.isString) throw SettingsException("$source: \"$key\" must be a string")
             return p.asString.takeIf { it.isNotBlank() }?.let(::expandHome)
+        }
+
+        private fun stringList(key: String): List<String> {
+            val e = element(root, "", key) ?: return emptyList()
+            if (!e.isJsonArray || e.asJsonArray.any { !it.isJsonPrimitive || !it.asJsonPrimitive.isString }) {
+                throw SettingsException("$source: \"$key\" must be a list of strings")
+            }
+            return e.asJsonArray.map { it.asString.trim().trim('/') }.filter { it.isNotEmpty() }
         }
 
         private fun bool(obj: JsonObject?, path: String, key: String): Boolean? {

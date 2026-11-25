@@ -143,3 +143,23 @@ class AutoSettingsTest {
         assertTrue(SettingsLoader.parse("""{ "auto": { "maxContxt": 1 } }""", "f").second.any { it.contains("auto.maxContxt") })
     }
 }
+
+class IgnoreSettingsTest {
+    @get:Rule val tmp = TemporaryFolder()
+
+    @Test
+    fun `git submodules are skipped and the ignore setting adds to them`() {
+        val project = tmp.newFolder("p")
+        File(project, ".gitmodules").writeText("[submodule \"llama.cpp\"]\n\tpath = llama.cpp\n\turl = x\n[submodule \"w\"]\n\tpath = third_party/whisper.cpp\n")
+        val loaded = LoadedSettings(SettingsLoader.parse("""{ "ignore": ["generated_docs/", "assets"] }""", "f").first, emptyList(), emptyList())
+        val o = CliArgs.parse(listOf("-C", project.path)).withSettings(loaded)
+        assertEquals(setOf("llama.cpp", "whisper.cpp", "generated_docs", "assets"), o.ignoredDirs)
+    }
+
+    @Test
+    fun `the exploration limits can be set`() {
+        val s = SettingsLoader.parse("""{ "agent": { "maxExploreSteps": 5, "maxReReads": 2 } }""", "f").first
+        val l = s.agent.applyTo(com.llamatik.agent.core.agent.CodingLimits())
+        assertEquals(5, l.maxExploreSteps); assertEquals(2, l.maxReReads)
+    }
+}
